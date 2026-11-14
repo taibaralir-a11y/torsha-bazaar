@@ -145,16 +145,29 @@ import {
   handleAuthSignOut, 
   getCurrentAuthUid 
 } from './firebase';
-import { onAuthStateChanged, User } from 'firebase/auth';
+import { onAuthStateChanged, getRedirectResult, signOut, User } from 'firebase/auth';
 import { doc, deleteDoc, collection, onSnapshot, query, where, getDoc, getDocs, writeBatch } from 'firebase/firestore';
 import { normalizePhoneE164, phonesMatchNormalized } from './utils/phone';
+
+const isAdminUrlPath = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const path = window.location.pathname.replace(/\/+$/, '').toLowerCase();
+  const hash = window.location.hash.replace(/\/+$/, '').toLowerCase();
+  return path === '/admin' || hash === '#/admin' || hash === '#admin';
+};
 
 export default function App() {
   // Portal Mode: customer, shopkeeper, admin, driver, delivery, service_provider, employer
   const [portalMode, setPortalMode] = useState<PortalMode>(() => {
+    if (isAdminUrlPath()) {
+      return 'admin';
+    }
     try {
-      const saved = localStorage.getItem('tb_portal_mode');
-      return (saved as PortalMode) || 'customer';
+      const saved = localStorage.getItem('tb_portal_mode') as PortalMode | null;
+      if (saved && saved !== 'admin') {
+        return saved;
+      }
+      return 'customer';
     } catch {
       return 'customer';
     }
@@ -455,6 +468,10 @@ export default function App() {
   const [isCustomerAuthModalOpen, setIsCustomerAuthModalOpen] = useState(false);
   const [isDriverAuthModalOpen, setIsDriverAuthModalOpen] = useState(false);
   const [isAdminAuthModalOpen, setIsAdminAuthModalOpen] = useState(false);
+  const isAdminAuthModalOpenRef = useRef(isAdminAuthModalOpen);
+  isAdminAuthModalOpenRef.current = isAdminAuthModalOpen;
+  const [adminAuthError, setAdminAuthError] = useState('');
+  const [adminCustomers, setAdminCustomers] = useState<UserProfile[]>([]);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(() => auth.currentUser);
   const ADMIN_EMAIL = 'taibaralir@gmail.com';
   const isAdminAuthenticated = Boolean(
@@ -465,14 +482,47 @@ export default function App() {
   const [trackedOrder, setTrackedOrder] = useState<Order | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Persist portalMode
+  // Persist non-admin portalMode & synchronize /admin URL path
   useEffect(() => {
     try {
-      localStorage.setItem('tb_portal_mode', portalMode);
+      if (portalMode !== 'admin') {
+        localStorage.setItem('tb_portal_mode', portalMode);
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+
+    try {
+      const onAdminPath = isAdminUrlPath();
+      if (portalMode === 'admin' && !onAdminPath) {
+        window.history.replaceState(null, '', '/admin');
+      } else if (portalMode !== 'admin' && onAdminPath) {
+        window.history.replaceState(null, '', '/');
+      }
     } catch (e) {
       console.warn(e);
     }
   }, [portalMode]);
+
+  // Listen to browser navigation / hash changes for direct /admin URL routing
+  useEffect(() => {
+    const handleRouteChange = () => {
+      if (isAdminUrlPath()) {
+        try {
+          sessionStorage.removeItem('tb_admin_manual_switch');
+        } catch {
+          // ignore
+        }
+        setPortalMode('admin');
+      }
+    };
+    window.addEventListener('popstate', handleRouteChange);
+    window.addEventListener('hashchange', handleRouteChange);
+    return () => {
+      window.removeEventListener('popstate', handleRouteChange);
+      window.removeEventListener('hashchange', handleRouteChange);
+    };
+  }, []);
 
   const getAuthFlags = (fbUser: User | null, profilePhone?: string) => {
     if (!fbUser) {
@@ -533,9 +583,84 @@ export default function App() {
   // Never assume authentication solely from tb_user in localStorage.
   // Never mark Firebase Anonymous Auth as phone-verified or account-verified.
   useEffect(() => {
+    // Process Google Sign-In redirect result (mobile PWA fallback when popups are blocked)
+    getRedirectResult(auth)
+      .then(async (res) => {
+        if (!res?.user) return;
+        const email = res.user.email?.toLowerCase();
+        const isPendingAdminRedirect = (() => {
+          try {
+            return sessionStorage.getItem('tb_admin_login_pending') === 'true';
+          } catch {
+            return false;
+          }
+        })();
+
+        if (email === ADMIN_EMAIL.toLowerCase() && res.user.emailVerified === true) {
+          try {
+            sessionStorage.removeItem('tb_admin_login_pending');
+            sessionStorage.removeItem('tb_admin_manual_switch');
+          } catch {
+            // ignore
+          }
+          setAdminAuthError('');
+          setIsAdminAuthModalOpen(false);
+          setPortalMode('admin');
+        } else if (isPendingAdminRedirect || isAdminUrlPath()) {
+          try {
+            sessionStorage.removeItem('tb_admin_login_pending');
+          } catch {
+            // ignore
+          }
+          await signOut(auth).catch(() => {});
+          setAdminAuthError(
+            `Access denied. Account ${res.user.email || 'unknown'} is not verified as the authorized Super Admin (${ADMIN_EMAIL}).`
+          );
+          setPortalMode('admin');
+        }
+      })
+      .catch((err: any) => {
+        try {
+          if (sessionStorage.getItem('tb_admin_login_pending') === 'true') {
+            sessionStorage.removeItem('tb_admin_login_pending');
+            setAdminAuthError(`Google Auth verification failed: ${err?.message || 'Unauthorized'}`);
+          }
+        } catch {
+          // ignore
+        }
+      });
+
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
       if (fbUser) {
+        const isVerifiedAdminUser =
+          fbUser.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase() &&
+          fbUser.emailVerified === true;
+
+        if (isVerifiedAdminUser) {
+          setAdminAuthError('');
+          let manualSwitch = false;
+          let adminLoginPending = false;
+          try {
+            manualSwitch = sessionStorage.getItem('tb_admin_manual_switch') === 'true';
+            adminLoginPending = sessionStorage.getItem('tb_admin_login_pending') === 'true';
+            if (adminLoginPending) {
+              sessionStorage.removeItem('tb_admin_login_pending');
+            }
+          } catch {
+            // ignore
+          }
+          if (
+            isAdminUrlPath() ||
+            adminLoginPending ||
+            isAdminAuthModalOpenRef.current ||
+            !manualSwitch
+          ) {
+            setIsAdminAuthModalOpen(false);
+            setPortalMode('admin');
+          }
+        }
+
         let remoteProfile: Partial<UserProfile> = {};
         try {
           const snap = await getDoc(doc(db, 'customers', fbUser.uid));
@@ -561,6 +686,7 @@ export default function App() {
           return updated;
         });
       } else {
+        setAdminCustomers([]);
         const flags = getAuthFlags(null);
         setUser((prev) => ({
           ...prev,
@@ -719,21 +845,74 @@ export default function App() {
     }
   }, [emergencyDoctorRequests]);
 
+  // Clear sensitive admin-only state whenever verified Admin session is not active
+  useEffect(() => {
+    if (!isAdminAuthenticated) {
+      setAdminCustomers([]);
+      setAdminActivities([]);
+    }
+  }, [isAdminAuthenticated]);
+
+  const handleSelectPortalMode = (mode: PortalMode) => {
+    if (mode === 'admin') {
+      try {
+        sessionStorage.removeItem('tb_admin_manual_switch');
+      } catch {
+        // ignore
+      }
+      setAdminAuthError('');
+      setPortalMode('admin');
+      if (!isAdminAuthenticated) {
+        setIsAdminAuthModalOpen(true);
+      }
+      return;
+    }
+
+    if (isAdminAuthenticated) {
+      try {
+        sessionStorage.setItem('tb_admin_manual_switch', 'true');
+      } catch {
+        // ignore
+      }
+    }
+    setPortalMode(mode);
+  };
+
+  const handleAdminLogout = async () => {
+    try {
+      sessionStorage.removeItem('tb_admin_manual_switch');
+      sessionStorage.removeItem('tb_admin_login_pending');
+    } catch {
+      // ignore
+    }
+    setAdminAuthError('');
+    setAdminCustomers([]);
+    setAdminActivities([]);
+    setIsAdminAuthModalOpen(false);
+    await handleAuthSignOut();
+    try {
+      localStorage.removeItem('tb_user');
+    } catch (e) {
+      console.warn(e);
+    }
+    setUser(INITIAL_USER);
+    setPortalMode('customer');
+  };
+
   // Helper to record admin activities (synced to Firestore only when verified Super Admin)
   const logAdminAction = (action: string, details: string) => {
+    if (!isAdminAuthenticated) return;
     const act: AdminActivity = {
       id: `act-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      adminEmail: firebaseUser?.email || 'taibaralir@gmail.com',
+      adminEmail: firebaseUser?.email || ADMIN_EMAIL,
       action,
       details,
       timestamp: new Date().toISOString()
     };
     setAdminActivities((prev) => [act, ...prev]);
-    if (isAdminAuthenticated) {
-      safeSetDoc(doc(db, 'adminActivity', act.id), act).catch((err) =>
-        console.warn('Firestore adminActivity sync:', err.message)
-      );
-    }
+    safeSetDoc(doc(db, 'adminActivity', act.id), act).catch((err) =>
+      console.warn('Firestore adminActivity sync:', err.message)
+    );
   };
 
   // Persist localities
@@ -930,6 +1109,16 @@ export default function App() {
 
     if (isAdminAuthenticated) {
       unsubs.push(
+        onSnapshot(collection(db, 'customers'), (snap) => {
+          const list = snap.docs.map((d) => ({ id: d.id, userId: d.id, ...d.data() } as UserProfile));
+          setAdminCustomers(list);
+        }, (err) => console.warn('Admin customers listener:', err.message)),
+        onSnapshot(collection(db, 'adminActivity'), (snap) => {
+          const list = snap.docs
+            .map((d) => ({ id: d.id, ...d.data() } as AdminActivity))
+            .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+          setAdminActivities(list);
+        }, (err) => console.warn('Admin activity listener:', err.message)),
         onSnapshot(collection(db, 'orders'), (snap) => {
           if (!snap.empty) {
             setOrders((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as Order))));
@@ -1260,36 +1449,33 @@ export default function App() {
 
   // --- LOCALITY HANDLERS ---
   const handleAddLocality = (newLoc: LocalityInfo) => {
+    if (!isAdminAuthenticated) return;
     setLocalities((prev) => {
       if (prev.some((l) => l.name.toLowerCase() === newLoc.name.toLowerCase())) {
         return prev;
       }
       return [...prev, newLoc];
     });
-    if (isAdminAuthenticated) {
-      safeSetDoc(doc(db, 'localities', newLoc.id), newLoc, { merge: true }).catch((err) => console.warn(err));
-    }
+    safeSetDoc(doc(db, 'localities', newLoc.id), newLoc, { merge: true }).catch((err) => console.warn(err));
     logAdminAction('Locality Added', `Added ${newLoc.name} (PIN: ${newLoc.pincode}) under ${newLoc.parentArea}`);
   };
 
   const handleUpdateLocality = (localityId: string, updated: Partial<LocalityInfo>) => {
+    if (!isAdminAuthenticated) return;
     setLocalities((prev) =>
       prev.map((l) => (l.id === localityId ? { ...l, ...updated, updatedAt: new Date().toISOString() } : l))
     );
-    if (isAdminAuthenticated) {
-      safeUpdateDoc(doc(db, 'localities', localityId), {
-        ...updated,
-        updatedAt: new Date().toISOString()
-      }).catch((err) => console.warn(err));
-    }
+    safeUpdateDoc(doc(db, 'localities', localityId), {
+      ...updated,
+      updatedAt: new Date().toISOString()
+    }).catch((err) => console.warn(err));
     logAdminAction('Locality Updated', `Updated locality ${localityId}`);
   };
 
   const handleDeleteLocality = (localityId: string) => {
+    if (!isAdminAuthenticated) return;
     setLocalities((prev) => prev.filter((l) => l.id !== localityId));
-    if (isAdminAuthenticated) {
-      deleteDoc(doc(db, 'localities', localityId)).catch((err) => console.warn(err));
-    }
+    deleteDoc(doc(db, 'localities', localityId)).catch((err) => console.warn(err));
     logAdminAction('Locality Deleted', `Deleted locality ${localityId}`);
   };
 
@@ -1396,6 +1582,7 @@ export default function App() {
   };
 
   const handleUpdateScrapStatus = (requestId: string, status: ScrapRequest['status']) => {
+    if (!isAdminAuthenticated && status !== 'cancelled') return;
     const updatedAt = new Date().toISOString();
     setScrapRequests((prev) => {
       const updated = prev.map((req) => (req.id === requestId ? { ...req, status, updatedAt } : req));
@@ -1734,17 +1921,16 @@ export default function App() {
   };
 
   const handleUpdateDriverStatus = (driverId: string, status: ShopApprovalStatus) => {
+    if (!isAdminAuthenticated) return;
     setDrivers((prev) =>
       prev.map((d) => (d.id === driverId ? { ...d, status, approvalStatus: status } : d))
     );
     if (currentDriver.id === driverId) {
       setCurrentDriver((prev) => ({ ...prev, status, approvalStatus: status }));
     }
-    if (isAdminAuthenticated) {
-      safeUpdateDoc(doc(db, 'drivers', driverId), { status, approvalStatus: status }).catch((err) =>
-        console.warn(err)
-      );
-    }
+    safeUpdateDoc(doc(db, 'drivers', driverId), { status, approvalStatus: status }).catch((err) =>
+      console.warn(err)
+    );
     logAdminAction('Driver Verification', `Updated driver ${driverId} status to ${status}`);
   };
 
@@ -2010,6 +2196,7 @@ export default function App() {
   };
 
   const handleUpdateDeliveryPersonStatus = (personId: string, status: ShopApprovalStatus) => {
+    if (!isAdminAuthenticated) return;
     const updatedAt = new Date().toISOString();
     setDeliveryPersons((prev) =>
       prev.map((p) => (p.id === personId ? { ...p, status } : p))
@@ -2017,20 +2204,18 @@ export default function App() {
     if (currentRider.id === personId) {
       setCurrentRider((prev) => ({ ...prev, status }));
     }
-    if (isAdminAuthenticated) {
-      safeUpdateDoc(doc(db, 'deliveryPersons', personId), { status }).catch((err) => console.warn(err));
-      const targetRider = deliveryPersons.find((p) => p.id === personId);
-      if (targetRider) {
-        const publicCard = toPublicRiderCard({ ...targetRider, status, updatedAt });
-        safeSetDoc(doc(db, 'publicRiders', personId), publicCard, { merge: true }).catch((err) =>
-          console.warn('Public rider sync notice:', err.message)
-        );
-        setApprovedRiders((prev) =>
-          status === 'approved'
-            ? mergeById(prev, [publicCard])
-            : prev.filter((r) => r.id !== personId)
-        );
-      }
+    safeUpdateDoc(doc(db, 'deliveryPersons', personId), { status }).catch((err) => console.warn(err));
+    const targetRider = deliveryPersons.find((p) => p.id === personId);
+    if (targetRider) {
+      const publicCard = toPublicRiderCard({ ...targetRider, status, updatedAt });
+      safeSetDoc(doc(db, 'publicRiders', personId), publicCard, { merge: true }).catch((err) =>
+        console.warn('Public rider sync notice:', err.message)
+      );
+      setApprovedRiders((prev) =>
+        status === 'approved'
+          ? mergeById(prev, [publicCard])
+          : prev.filter((r) => r.id !== personId)
+      );
     }
     logAdminAction('Delivery Rider Verification', `Updated fleet rider ${personId} status to ${status}`);
   };
@@ -2076,6 +2261,7 @@ export default function App() {
     personName: string,
     personPhone: string
   ) => {
+    if (!isAdminAuthenticated) return;
     const patch = {
       status: 'assigned' as DeliveryStatus,
       assignedDeliveryPersonId: personId,
@@ -2086,9 +2272,7 @@ export default function App() {
     setDeliveries((prev) =>
       prev.map((d) => (d.id === deliveryId ? { ...d, ...patch } : d))
     );
-    if (isAdminAuthenticated) {
-      safeUpdateDoc(doc(db, 'deliveries', deliveryId), patch).catch((err) => console.warn(err));
-    }
+    safeUpdateDoc(doc(db, 'deliveries', deliveryId), patch).catch((err) => console.warn(err));
     logAdminAction('Manual Delivery Dispatch', `Assigned delivery ${deliveryId} to ${personName}`);
   };
 
@@ -2139,6 +2323,7 @@ export default function App() {
   };
 
   const handleUpdateServiceProviderStatus = (providerId: string, status: ShopApprovalStatus) => {
+    if (!isAdminAuthenticated) return;
     const updatedAt = new Date().toISOString();
     setServiceProviders((prev) =>
       prev.map((p) => (p.id === providerId ? { ...p, status, updatedAt } : p))
@@ -2146,16 +2331,14 @@ export default function App() {
     if (currentProvider.id === providerId) {
       setCurrentProvider((prev) => ({ ...prev, status, updatedAt }));
     }
-    if (isAdminAuthenticated) {
-      safeUpdateDoc(doc(db, 'serviceProviders', providerId), { status, updatedAt }).catch((err) => console.warn(err));
-      const targetProvider = serviceProviders.find((p) => p.id === providerId);
-      if (targetProvider) {
-        safeSetDoc(
-          doc(db, 'publicServiceProviders', providerId),
-          toPublicServiceProviderCard({ ...targetProvider, status, updatedAt }),
-          { merge: true }
-        ).catch((err) => console.warn('Public provider sync notice:', err.message));
-      }
+    safeUpdateDoc(doc(db, 'serviceProviders', providerId), { status, updatedAt }).catch((err) => console.warn(err));
+    const targetProvider = serviceProviders.find((p) => p.id === providerId);
+    if (targetProvider) {
+      safeSetDoc(
+        doc(db, 'publicServiceProviders', providerId),
+        toPublicServiceProviderCard({ ...targetProvider, status, updatedAt }),
+        { merge: true }
+      ).catch((err) => console.warn('Public provider sync notice:', err.message));
     }
     logAdminAction('Technician Verification', `Updated service provider ${providerId} status to ${status}`);
   };
@@ -2242,20 +2425,19 @@ export default function App() {
   };
 
   const handleUpdateJobStatus = (jobId: string, status: 'pending' | 'approved' | 'rejected') => {
+    if (!isAdminAuthenticated) return;
     const updatedAt = new Date().toISOString();
     setJobListings((prev) =>
       prev.map((j) => (j.id === jobId ? { ...j, status } : j))
     );
-    if (isAdminAuthenticated) {
-      safeUpdateDoc(doc(db, 'jobs', jobId), { status }).catch((err) => console.warn(err));
-      const targetJob = jobListings.find((j) => j.id === jobId);
-      if (targetJob) {
-        safeSetDoc(
-          doc(db, 'publicJobs', jobId),
-          toPublicJobCard({ ...targetJob, status, updatedAt }),
-          { merge: true }
-        ).catch((err) => console.warn('Public job sync notice:', err.message));
-      }
+    safeUpdateDoc(doc(db, 'jobs', jobId), { status }).catch((err) => console.warn(err));
+    const targetJob = jobListings.find((j) => j.id === jobId);
+    if (targetJob) {
+      safeSetDoc(
+        doc(db, 'publicJobs', jobId),
+        toPublicJobCard({ ...targetJob, status, updatedAt }),
+        { merge: true }
+      ).catch((err) => console.warn('Public job sync notice:', err.message));
     }
     logAdminAction('Job Listing Review', `Marked job listing ${jobId} as ${status}`);
   };
@@ -2296,6 +2478,7 @@ export default function App() {
 
   // --- ADMIN COMPLAINTS HANDLERS ---
   const handleResolveComplaint = (complaintId: string, notes: string) => {
+    if (!isAdminAuthenticated) return;
     setComplaints((prev) =>
       prev.map((c) =>
         c.id === complaintId
@@ -2303,12 +2486,10 @@ export default function App() {
           : c
       )
     );
-    if (isAdminAuthenticated) {
-      safeUpdateDoc(doc(db, 'complaints', complaintId), {
-        status: 'resolved',
-        resolutionNotes: notes
-      }).catch((err) => console.warn(err));
-    }
+    safeUpdateDoc(doc(db, 'complaints', complaintId), {
+      status: 'resolved',
+      resolutionNotes: notes
+    }).catch((err) => console.warn(err));
     logAdminAction('Grievance Resolved', `Resolved complaint ${complaintId}: ${notes}`);
   };
 
@@ -2359,21 +2540,20 @@ export default function App() {
   };
 
   const handleUpdateDoctorStatus = (doctorId: string, status: 'approved' | 'rejected' | 'suspended' | 'pending') => {
+    if (!isAdminAuthenticated) return;
     const updatedAt = new Date().toISOString();
     setDoctors((prev) => prev.map((d) => (d.id === doctorId ? { ...d, status, updatedAt } : d)));
     if (currentDoctor.id === doctorId) {
       setCurrentDoctor((prev) => ({ ...prev, status, updatedAt }));
     }
-    if (isAdminAuthenticated) {
-      safeUpdateDoc(doc(db, 'doctors', doctorId), { status, updatedAt }).catch((err) => console.warn(err));
-      const targetDoc = doctors.find((d) => d.id === doctorId);
-      if (targetDoc) {
-        safeSetDoc(
-          doc(db, 'publicDoctors', doctorId),
-          toPublicDoctorCard({ ...targetDoc, status, updatedAt }),
-          { merge: true }
-        ).catch((err) => console.warn('Public doctor sync notice:', err.message));
-      }
+    safeUpdateDoc(doc(db, 'doctors', doctorId), { status, updatedAt }).catch((err) => console.warn(err));
+    const targetDoc = doctors.find((d) => d.id === doctorId);
+    if (targetDoc) {
+      safeSetDoc(
+        doc(db, 'publicDoctors', doctorId),
+        toPublicDoctorCard({ ...targetDoc, status, updatedAt }),
+        { merge: true }
+      ).catch((err) => console.warn('Public doctor sync notice:', err.message));
     }
     logAdminAction('Doctor Verification', `Updated doctor ${doctorId} status to ${status}`);
   };
@@ -2526,11 +2706,18 @@ export default function App() {
         <div className="min-h-screen bg-slate-900/90 backdrop-blur-xs flex items-center justify-center p-4">
           <AdminAuthModal
             isOpen={true}
-            onClose={() => setPortalMode('customer')}
+            onClose={() => {
+              setAdminAuthError('');
+              setIsAdminAuthModalOpen(false);
+              setPortalMode('customer');
+            }}
             onLoginSuccess={() => {
-              // Verified directly by Firebase onAuthStateChanged
+              setAdminAuthError('');
+              setIsAdminAuthModalOpen(false);
+              setPortalMode('admin');
             }}
             allowedEmail={ADMIN_EMAIL}
+            externalError={adminAuthError}
           />
         </div>
       );
@@ -2543,21 +2730,21 @@ export default function App() {
             onSwitchPortal={() => {
               setIsPortalSwitcherOpen(true);
             }}
+            onLogout={handleAdminLogout}
             shops={shops}
             onUpdateShopStatus={(shopId, status) => {
+              if (!isAdminAuthenticated) return;
               const updatedAt = new Date().toISOString();
               const targetShop = shops.find((s) => s.id === shopId);
               setShops((prev) => prev.map((s) => (s.id === shopId ? { ...s, status, isVerified: status === 'approved', updatedAt } : s)));
               setProducts((prev) => prev.map((p) => (p.shopId === shopId ? { ...p, shopStatus: status, updatedAt } : p)));
               if (shop.id === shopId) setShop((prev) => ({ ...prev, status, isVerified: status === 'approved', updatedAt }));
-              if (isAdminAuthenticated) {
-                safeUpdateDoc(doc(db, 'shops', shopId), {
-                  status,
-                  isVerified: status === 'approved',
-                  updatedAt
-                }).catch((err) => console.warn(err));
-                syncShopApprovalToPublicAndProducts(shopId, status, targetShop);
-              }
+              safeUpdateDoc(doc(db, 'shops', shopId), {
+                status,
+                isVerified: status === 'approved',
+                updatedAt
+              }).catch((err) => console.warn(err));
+              syncShopApprovalToPublicAndProducts(shopId, status, targetShop);
               logAdminAction('Shop Status Changed', `Shop ${shopId} updated to ${status}`);
             }}
             orders={orders}
@@ -2579,7 +2766,7 @@ export default function App() {
             adminActivities={adminActivities}
             scrapRequests={scrapRequests}
             onUpdateScrapStatus={handleUpdateScrapStatus}
-            adminEmail="taibaralir@gmail.com"
+            adminEmail={firebaseUser?.email || ''}
             localities={localities}
             onAddLocality={handleAddLocality}
             onUpdateLocality={handleUpdateLocality}
@@ -2588,14 +2775,16 @@ export default function App() {
             onUpdateDoctorStatus={handleUpdateDoctorStatus}
             emergencyDoctorRequests={emergencyDoctorRequests}
             onUpdateEmergencyDoctorRequestStatus={handleUpdateEmergencyDoctorRequestStatus}
-            customers={[user]}
+            customers={adminCustomers}
           />
 
           <PortalSwitcherModal
             isOpen={isPortalSwitcherOpen}
             onClose={() => setIsPortalSwitcherOpen(false)}
             currentMode={portalMode}
-            onSelectMode={(mode) => setPortalMode(mode)}
+            onSelectMode={handleSelectPortalMode}
+            userEmail={firebaseUser?.email || null}
+            isAdmin={isAdminAuthenticated}
           />
         </div>
       </div>
@@ -2624,7 +2813,9 @@ export default function App() {
             isOpen={isPortalSwitcherOpen}
             onClose={() => setIsPortalSwitcherOpen(false)}
             currentMode={portalMode}
-            onSelectMode={(mode) => setPortalMode(mode)}
+            onSelectMode={handleSelectPortalMode}
+            userEmail={firebaseUser?.email || null}
+            isAdmin={isAdminAuthenticated}
           />
         </div>
       </div>
@@ -2653,7 +2844,9 @@ export default function App() {
             isOpen={isPortalSwitcherOpen}
             onClose={() => setIsPortalSwitcherOpen(false)}
             currentMode={portalMode}
-            onSelectMode={(mode) => setPortalMode(mode)}
+            onSelectMode={handleSelectPortalMode}
+            userEmail={firebaseUser?.email || null}
+            isAdmin={isAdminAuthenticated}
           />
         </div>
       </div>
@@ -2681,7 +2874,9 @@ export default function App() {
             isOpen={isPortalSwitcherOpen}
             onClose={() => setIsPortalSwitcherOpen(false)}
             currentMode={portalMode}
-            onSelectMode={(mode) => setPortalMode(mode)}
+            onSelectMode={handleSelectPortalMode}
+            userEmail={firebaseUser?.email || null}
+            isAdmin={isAdminAuthenticated}
           />
         </div>
       </div>
@@ -2707,7 +2902,9 @@ export default function App() {
             isOpen={isPortalSwitcherOpen}
             onClose={() => setIsPortalSwitcherOpen(false)}
             currentMode={portalMode}
-            onSelectMode={(mode) => setPortalMode(mode)}
+            onSelectMode={handleSelectPortalMode}
+            userEmail={firebaseUser?.email || null}
+            isAdmin={isAdminAuthenticated}
           />
         </div>
       </div>
@@ -2727,7 +2924,7 @@ export default function App() {
             orders={orders}
             products={products.filter((p) => !p.shopId || p.shopId === shop.id)}
             approvedRiders={approvedRiders}
-            onSwitchToCustomer={() => setPortalMode('customer')}
+            onSwitchToCustomer={() => handleSelectPortalMode('customer')}
             onUpdateShop={handleUpdateShop}
             onAdminChangeStatus={handleAdminChangeStatus}
             onUpdateOrderStatus={handleUpdateOrderStatus}
@@ -2742,7 +2939,9 @@ export default function App() {
             isOpen={isPortalSwitcherOpen}
             onClose={() => setIsPortalSwitcherOpen(false)}
             currentMode={portalMode}
-            onSelectMode={(mode) => setPortalMode(mode)}
+            onSelectMode={handleSelectPortalMode}
+            userEmail={firebaseUser?.email || null}
+            isAdmin={isAdminAuthenticated}
           />
         </div>
       </div>
@@ -2757,7 +2956,7 @@ export default function App() {
       <div className="min-h-screen bg-slate-100 flex justify-center text-slate-900 selection:bg-lime-200">
         <div className="w-full max-w-md bg-white min-h-screen shadow-2xl relative flex flex-col border-x border-gray-200">
           <ScrapMarketplaceView
-            onBackToHome={() => setPortalMode('customer')}
+            onBackToHome={() => handleSelectPortalMode('customer')}
             user={user}
             currentLocality={currentLocation}
             scrapRequests={scrapRequests}
@@ -2772,7 +2971,9 @@ export default function App() {
             isOpen={isPortalSwitcherOpen}
             onClose={() => setIsPortalSwitcherOpen(false)}
             currentMode={portalMode}
-            onSelectMode={(mode) => setPortalMode(mode)}
+            onSelectMode={handleSelectPortalMode}
+            userEmail={firebaseUser?.email || null}
+            isAdmin={isAdminAuthenticated}
           />
         </div>
       </div>
@@ -2794,7 +2995,7 @@ export default function App() {
             onUpdateRequestStatus={handleUpdateEmergencyDoctorRequestStatus}
             onSwitchPortal={() => setIsPortalSwitcherOpen(true)}
             onLogout={() => {
-              setPortalMode('customer');
+              handleSelectPortalMode('customer');
             }}
             localities={localities}
           />
@@ -2815,7 +3016,9 @@ export default function App() {
             isOpen={isPortalSwitcherOpen}
             onClose={() => setIsPortalSwitcherOpen(false)}
             currentMode={portalMode}
-            onSelectMode={(mode) => setPortalMode(mode)}
+            onSelectMode={handleSelectPortalMode}
+            userEmail={firebaseUser?.email || null}
+            isAdmin={isAdminAuthenticated}
           />
         </div>
       </div>
@@ -2828,6 +3031,30 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-100 flex justify-center text-slate-900 selection:bg-emerald-200">
       <div className="w-full max-w-md bg-white min-h-screen shadow-2xl relative flex flex-col border-x border-gray-200/80">
+        {isAdminAuthenticated && (
+          <div className="bg-purple-950 text-white px-3 py-1.5 flex items-center justify-between text-[11px] border-b border-purple-800">
+            <span className="font-semibold text-purple-200 truncate">
+              Admin Preview ({firebaseUser?.email})
+            </span>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleSelectPortalMode('admin')}
+                className="px-2 py-0.5 rounded-md bg-purple-600 hover:bg-purple-500 text-white font-bold transition-colors"
+              >
+                Return to Admin
+              </button>
+              <button
+                type="button"
+                onClick={handleAdminLogout}
+                className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition-colors"
+              >
+                Sign Out
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Top Header */}
         <Header
           currentLocation={currentLocation}
@@ -3169,7 +3396,9 @@ export default function App() {
           isOpen={isPortalSwitcherOpen}
           onClose={() => setIsPortalSwitcherOpen(false)}
           currentMode={portalMode}
-          onSelectMode={(mode) => setPortalMode(mode)}
+          onSelectMode={handleSelectPortalMode}
+          userEmail={firebaseUser?.email || null}
+          isAdmin={isAdminAuthenticated}
         />
 
         <UniversalQrModal
@@ -3260,9 +3489,12 @@ export default function App() {
           isOpen={isAdminAuthModalOpen}
           onClose={() => setIsAdminAuthModalOpen(false)}
           onLoginSuccess={() => {
+            setAdminAuthError('');
             setIsAdminAuthModalOpen(false);
             setPortalMode('admin');
           }}
+          allowedEmail={ADMIN_EMAIL}
+          externalError={adminAuthError}
         />
 
         {/* Real-time Global PWA Offline/Online Connectivity Banner */}

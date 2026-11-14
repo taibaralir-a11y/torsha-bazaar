@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   X, 
   ShieldAlert, 
@@ -13,6 +13,7 @@ import {
 import { 
   GoogleAuthProvider, 
   signInWithPopup, 
+  signInWithRedirect,
   signInWithEmailAndPassword, 
   signOut 
 } from 'firebase/auth';
@@ -23,42 +24,89 @@ interface AdminAuthModalProps {
   onClose: () => void;
   onLoginSuccess: (email: string) => void;
   allowedEmail?: string;
+  externalError?: string;
 }
 
 export const AdminAuthModal: React.FC<AdminAuthModalProps> = ({
   isOpen,
   onClose,
   onLoginSuccess,
-  allowedEmail = 'taibaralir@gmail.com'
+  allowedEmail = 'taibaralir@gmail.com',
+  externalError = ''
 }) => {
   const [email, setEmail] = useState(allowedEmail);
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(externalError);
   const [isSigningInWithGoogle, setIsSigningInWithGoogle] = useState(false);
   const [isSigningInWithEmail, setIsSigningInWithEmail] = useState(false);
 
+  useEffect(() => {
+    if (externalError) {
+      setError(externalError);
+    }
+  }, [externalError]);
+
   if (!isOpen) return null;
+
+  const isTopLevelWindow = (() => {
+    try {
+      return window.self === window.top;
+    } catch {
+      return false;
+    }
+  })();
 
   const handleGoogleAdminLogin = async () => {
     setError('');
     setIsSigningInWithGoogle(true);
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ login_hint: allowedEmail, prompt: 'select_account' });
+
     try {
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ login_hint: allowedEmail });
       const res = await signInWithPopup(auth, provider);
       const userEmail = res.user.email?.toLowerCase();
       if (userEmail === allowedEmail.toLowerCase() && res.user.emailVerified) {
-        onLoginSuccess(allowedEmail);
+        try {
+          sessionStorage.removeItem('tb_admin_manual_switch');
+          sessionStorage.removeItem('tb_admin_login_pending');
+        } catch {
+          // ignore sessionStorage access errors
+        }
+        onLoginSuccess(res.user.email || allowedEmail);
         onClose();
       } else {
         await signOut(auth).catch(() => {});
         setError(`Access denied. Account ${res.user.email || 'unknown'} is not verified as the authorized Super Admin (${allowedEmail}).`);
       }
     } catch (err: any) {
+      const errCode = err?.code || '';
+      const shouldTryRedirect =
+        isTopLevelWindow &&
+        (errCode === 'auth/popup-blocked' ||
+          errCode === 'auth/operation-not-supported-in-this-environment' ||
+          errCode === 'auth/web-storage-unsupported');
+
+      if (shouldTryRedirect) {
+        try {
+          sessionStorage.setItem('tb_admin_login_pending', 'true');
+          await signInWithRedirect(auth, provider);
+          return;
+        } catch (redirectErr: any) {
+          console.warn('Google redirect fallback failed:', redirectErr);
+          setError(`Google Sign-In redirect failed: ${redirectErr?.message || 'Unauthorized'}`);
+          setIsSigningInWithGoogle(false);
+          return;
+        }
+      }
+
       console.warn('Google auth notice:', err);
-      setError(err?.message?.includes('popup-closed') 
-        ? 'Sign-in window closed. Please complete Google Sign-In as the authorized admin.' 
-        : `Google Auth verification failed: ${err?.message || 'Unauthorized'}`);
+      if (!isTopLevelWindow && (errCode === 'auth/popup-blocked' || errCode === 'auth/operation-not-supported-in-this-environment')) {
+        setError('Sign-in popup was blocked inside this embedded frame. Please allow popups or open TORSHA BAZAAR in a standalone browser tab to sign in.');
+      } else if (err?.message?.includes('popup-closed') || errCode === 'auth/popup-closed-by-user') {
+        setError('Sign-in window closed. Please complete Google Sign-In as the authorized admin.');
+      } else {
+        setError(`Google Auth verification failed: ${err?.message || 'Unauthorized'}`);
+      }
     } finally {
       setIsSigningInWithGoogle(false);
     }
@@ -87,8 +135,14 @@ export const AdminAuthModal: React.FC<AdminAuthModalProps> = ({
         setError(`Access denied. Email verification is required for Super Admin (${allowedEmail}).`);
         return;
       }
+      try {
+        sessionStorage.removeItem('tb_admin_manual_switch');
+        sessionStorage.removeItem('tb_admin_login_pending');
+      } catch {
+        // ignore sessionStorage access errors
+      }
       setPassword('');
-      onLoginSuccess(allowedEmail);
+      onLoginSuccess(cred.user.email || allowedEmail);
       onClose();
     } catch (err: any) {
       console.warn('Firebase Admin Auth failed:', err?.code || err?.message);

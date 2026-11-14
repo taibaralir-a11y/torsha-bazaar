@@ -30,7 +30,8 @@ import {
   Navigation,
   Stethoscope,
   Phone,
-  HeartHandshake
+  HeartHandshake,
+  LogOut
 } from 'lucide-react';
 import { 
   Shop, 
@@ -89,6 +90,7 @@ interface AdminDashboardProps {
   emergencyDoctorRequests?: EmergencyDoctorRequest[];
   onUpdateEmergencyDoctorRequestStatus?: (requestId: string, status: EmergencyDoctorStatus) => void;
   customers?: UserProfile[];
+  onLogout?: () => void;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -114,7 +116,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   adminActivities,
   scrapRequests = [],
   onUpdateScrapStatus,
-  adminEmail = 'taibaralir@gmail.com',
+  adminEmail = '',
   localities = INITIAL_SERVICE_LOCALITIES,
   onAddLocality,
   onUpdateLocality,
@@ -123,7 +125,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onUpdateDoctorStatus,
   emergencyDoctorRequests = [],
   onUpdateEmergencyDoctorRequestStatus,
-  customers = []
+  customers = [],
+  onLogout
 }) => {
   const [activeTab, setActiveTab] = useState<
     'overview' | 'shops' | 'orders' | 'doctors' | 'emergency_requests' | 'customers' | 'drivers' | 'deliveries' | 'services' | 'jobs' | 'scrap' | 'localities' | 'complaints' | 'activity'
@@ -245,7 +248,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </span>
             </div>
             <p className="text-[11px] text-slate-400">
-              Authenticated: {adminEmail} • Central Dooars Control
+              Authenticated: {adminEmail || 'Not Signed In'} • Central Dooars Control
             </p>
           </div>
         </div>
@@ -259,6 +262,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <ArrowLeft className="w-4 h-4 text-purple-400" />
             <span>Switch Portal</span>
           </button>
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              title="Sign Out of Admin"
+              className="flex items-center gap-1 text-xs font-bold text-rose-200 hover:text-white bg-rose-950/80 hover:bg-rose-900 px-2.5 py-1.5 rounded-xl border border-rose-800/80 transition-all active:scale-95"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Sign Out</span>
+            </button>
+          )}
         </div>
       </header>
 
@@ -657,34 +670,54 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <span>Registered Customers ({customers.length})</span>
             </h3>
 
-            <div className="space-y-2">
-              {customers.map((c, idx) => (
-                <div key={idx} className="bg-slate-800 border border-slate-700 rounded-2xl p-3.5 flex items-center justify-between text-xs">
-                  <div>
-                    <h4 className="font-bold text-white text-sm">{c.name}</h4>
-                    <p className="text-slate-400 flex items-center gap-1.5 mt-0.5">
-                      <Phone className="w-3 h-3 text-emerald-400" />
-                      <span>{c.phone}</span>
-                      <span>• {c.email}</span>
-                    </p>
-                    <p className="text-slate-400 flex items-center gap-1 mt-0.5">
-                      <MapPin className="w-3 h-3 text-rose-400 shrink-0" />
-                      <span>{c.location} (PIN {c.pincode}) — {c.address}</span>
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <span className="text-[10px] font-bold bg-purple-950 text-purple-300 border border-purple-800 px-2 py-0.5 rounded-full uppercase">
-                      Verified User
-                    </span>
-                    {c.gpsCoordinates && (
-                      <span className="text-[10px] font-mono text-slate-400 block mt-1">
-                        GPS: {c.gpsCoordinates.lat}, {c.gpsCoordinates.lng}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+            {customers.length === 0 ? (
+              <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 text-center text-xs text-slate-400">
+                No registered customer records synced from Firestore yet.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {customers.map((c, idx) => {
+                  const badge = c.isPhoneVerified
+                    ? { label: 'Phone Verified', cls: 'bg-emerald-950 text-emerald-300 border-emerald-800' }
+                    : c.isVerified
+                      ? { label: 'Email Verified', cls: 'bg-purple-950 text-purple-300 border-purple-800' }
+                      : c.authMethod === 'anonymous' || !c.isSessionAuthenticated
+                        ? { label: 'Guest Session', cls: 'bg-slate-900 text-slate-300 border-slate-700' }
+                        : { label: 'Unverified', cls: 'bg-amber-950 text-amber-300 border-amber-800' };
+
+                  return (
+                    <div key={c.id || c.userId || idx} className="bg-slate-800 border border-slate-700 rounded-2xl p-3.5 flex items-center justify-between gap-3 text-xs">
+                      <div className="min-w-0">
+                        <h4 className="font-bold text-white text-sm truncate">{c.name || 'Unnamed Customer'}</h4>
+                        <p className="text-slate-400 flex items-center gap-1.5 mt-0.5 flex-wrap">
+                          <Phone className="w-3 h-3 text-emerald-400 shrink-0" />
+                          <span>{c.phone || 'No phone'}</span>
+                          <span>• {c.email || 'No email'}</span>
+                        </p>
+                        <p className="text-slate-400 flex items-center gap-1 mt-0.5">
+                          <MapPin className="w-3 h-3 text-rose-400 shrink-0" />
+                          <span>
+                            {c.location || 'Satali'}
+                            {c.pincode ? ` (PIN ${c.pincode})` : ''}
+                            {c.address ? ` — ${c.address}` : ''}
+                          </span>
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full uppercase ${badge.cls}`}>
+                          {badge.label}
+                        </span>
+                        {c.gpsCoordinates && (
+                          <span className="text-[10px] font-mono text-slate-400 block mt-1">
+                            GPS: {c.gpsCoordinates.lat}, {c.gpsCoordinates.lng}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
@@ -1642,19 +1675,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         {/* LOGS TAB */}
         {activeTab === 'activity' && (
           <div className="space-y-3">
-            <h3 className="text-sm font-bold text-white">Administrator Audit Trail</h3>
-            <div className="bg-slate-800 border border-slate-700 rounded-2xl divide-y divide-slate-700/60 p-2">
-              {adminActivities.map((act) => (
-                <div key={act.id} className="p-3 text-xs flex justify-between items-start">
-                  <div>
-                    <span className="font-bold text-purple-300 block">{act.action}</span>
-                    <span className="text-slate-300 mt-0.5 block">{act.details}</span>
-                    <span className="text-[10px] text-slate-500 font-mono mt-1 block">{act.adminEmail}</span>
+            <h3 className="text-sm font-bold text-white">Administrator Audit Trail ({adminActivities.length})</h3>
+            {adminActivities.length === 0 ? (
+              <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 text-center text-xs text-slate-400">
+                No administrator audit entries recorded yet.
+              </div>
+            ) : (
+              <div className="bg-slate-800 border border-slate-700 rounded-2xl divide-y divide-slate-700/60 p-2">
+                {adminActivities.map((act) => (
+                  <div key={act.id} className="p-3 text-xs flex justify-between items-start gap-2">
+                    <div>
+                      <span className="font-bold text-purple-300 block">{act.action}</span>
+                      <span className="text-slate-300 mt-0.5 block">{act.details}</span>
+                      <span className="text-[10px] text-slate-500 font-mono mt-1 block">{act.adminEmail}</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 font-mono shrink-0">
+                      {(act.timestamp || '').split('T')[0] || '—'}
+                    </span>
                   </div>
-                  <span className="text-[10px] text-slate-400 font-mono">{act.timestamp.split('T')[0]}</span>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </main>
