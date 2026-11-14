@@ -76,6 +76,10 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
   // Expiration timer simulated state
   const [secondsRemaining, setSecondsRemaining] = useState<number>(90);
 
+  useEffect(() => {
+    setCustomerActiveBookingId(null);
+  }, [customerId]);
+
   // Update proposed fare default when vehicle or route changes if user hasn't typed custom
   useEffect(() => {
     if (!isCustomFareInput) {
@@ -83,11 +87,11 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
     }
   }, [suggestedFare, isCustomFareInput]);
 
-  // Find currently active booking for customer strictly by authenticated customerId or active booking ID
+  // Find currently active booking for customer strictly by authenticated customerId
   const liveBooking = rideBookings.find(
-    (b) => b.id === customerActiveBookingId || 
-           (Boolean(customerId) &&
-            b.customerId === customerId &&
+    (b) => Boolean(customerId) &&
+           b.customerId === customerId &&
+           (b.id === customerActiveBookingId ||
             ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started'].includes(b.status))
   ) || null;
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Plus, Minus, ShoppingBag, ArrowRight, ShieldCheck, CheckCircle2, AlertTriangle, MapPin, Check } from 'lucide-react';
 import { CartItem, Order, UserProfile, Shop, LocalityInfo } from '../types';
 import { INITIAL_SERVICE_LOCALITIES, getLocalityByName, getDistanceBetween } from '../utils/hyperlocalRouting';
@@ -30,9 +30,16 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   const [deliveryLocality, setDeliveryLocality] = useState<string>(() => {
     return user.location || currentLocation?.split(',')[0].trim() || 'Satali';
   });
-  const [deliveryAddress, setDeliveryAddress] = useState(user.address);
+  const [deliveryAddress, setDeliveryAddress] = useState(user.address || '');
   const [isOrdered, setIsOrdered] = useState(false);
   const [approvedCrossLocality, setApprovedCrossLocality] = useState(false);
+
+  useEffect(() => {
+    setDeliveryLocality(user.location || currentLocation?.split(',')[0].trim() || 'Satali');
+    setDeliveryAddress(user.address || '');
+    setIsOrdered(false);
+    setApprovedCrossLocality(false);
+  }, [user.id, user.location, user.address, currentLocation]);
 
   if (!isOpen) return null;
 

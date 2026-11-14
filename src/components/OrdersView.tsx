@@ -4,15 +4,21 @@ import { Order } from '../types';
 
 interface OrdersViewProps {
   orders: Order[];
+  currentCustomerUid?: string | null;
   onBackToHome: () => void;
   onTrackOrder: (order: Order) => void;
 }
 
 export const OrdersView: React.FC<OrdersViewProps> = ({
   orders,
+  currentCustomerUid,
   onBackToHome,
   onTrackOrder
 }) => {
+  const customerOrders = currentCustomerUid
+    ? orders.filter((order) => order.customerId === currentCustomerUid)
+    : [];
+
   return (
     <div className="pb-24">
       {/* Header */}
@@ -35,14 +41,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       </div>
 
       <div className="p-4 space-y-3">
-        {orders.length === 0 ? (
+        {customerOrders.length === 0 ? (
           <div className="text-center py-12 bg-white rounded-2xl border border-gray-100">
             <ShoppingBag className="w-12 h-12 text-gray-300 mx-auto mb-2" />
             <p className="text-sm font-bold text-gray-700">No orders yet</p>
             <p className="text-xs text-gray-400 mt-1">Explore our Best Deals and add items to your cart!</p>
           </div>
         ) : (
-          orders.map((order) => {
+          customerOrders.map((order) => {
             const isLive = ['pending', 'confirmed', 'preparing', 'ready_for_dispatch', 'packed', 'out_for_delivery', 'placed'].includes(order.status);
 
             const getStatusBadge = () => {

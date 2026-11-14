@@ -49,14 +49,14 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
   const [categoryLabel, setCategoryLabel] = useState('Old Construction Iron & Grilles');
   const [estimatedWeight, setEstimatedWeight] = useState('15 - 25 kg');
   const [description, setDescription] = useState('');
-  const [pickupAddress, setPickupAddress] = useState(user.address || 'Hasimara Station Road');
+  const [pickupAddress, setPickupAddress] = useState(user.address || '');
   const [locality, setLocality] = useState(currentLocality.split(' ')[0] || 'Hasimara');
   const [pincode, setPincode] = useState('735215');
-  const [phone, setPhone] = useState(user.phone || '+91 98765-43210');
+  const [phone, setPhone] = useState(user.phone || '');
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState(false);
 
-  const myScrapRequests = scrapRequests.filter((r) => !user.id || r.customerId === user.id);
+  const myScrapRequests = scrapRequests.filter((r) => Boolean(user.id) && r.customerId === user.id);
 
   // Buyer Portal offer form states
   const [selectedRequestForOffer, setSelectedRequestForOffer] = useState<ScrapRequest | null>(null);

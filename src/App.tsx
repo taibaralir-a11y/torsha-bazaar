@@ -53,24 +53,16 @@ import { AdminAuthModal } from './components/common/AdminAuthModal';
 
 import { 
   ALL_PRODUCTS, 
-  INITIAL_ORDERS, 
-  INITIAL_USER, 
   INITIAL_SHOP,
   INITIAL_SHOPS,
   INITIAL_DRIVERS,
-  INITIAL_RIDE_BOOKINGS,
   INITIAL_DELIVERY_PERSONS,
-  INITIAL_DELIVERY_REQUESTS,
   INITIAL_SERVICE_PROVIDERS,
-  INITIAL_SERVICE_REQUESTS,
   INITIAL_JOB_LISTINGS,
   INITIAL_JOB_APPLICATIONS,
-  INITIAL_COMPLAINTS,
   INITIAL_ADMIN_ACTIVITIES,
   INITIAL_NOTIFICATIONS,
-  INITIAL_SCRAP_REQUESTS,
-  INITIAL_DOCTORS,
-  INITIAL_EMERGENCY_REQUESTS
+  INITIAL_DOCTORS
 } from './data/mockData';
 import { 
   SERVICE_LOCALITIES, 
@@ -156,6 +148,39 @@ const isAdminUrlPath = (): boolean => {
   return path === '/admin' || hash === '#/admin' || hash === '#admin';
 };
 
+const createGuestUserProfile = (
+  location = 'Satali',
+  pincode = '735214',
+  language: UserProfile['language'] = 'en'
+): UserProfile => ({
+  id: '',
+  userId: '',
+  name: 'Guest Customer',
+  phone: '',
+  email: '',
+  address: '',
+  location,
+  pincode,
+  language,
+  wishlist: [],
+  isSessionAuthenticated: false,
+  isPhoneVerified: false,
+  isVerified: false,
+  authMethod: 'none'
+});
+
+const CUSTOMER_LOCAL_STORAGE_KEYS = [
+  'tb_orders',
+  'tb_cart',
+  'tb_complaints',
+  'tb_ride_bookings',
+  'tb_deliveries',
+  'tb_service_requests',
+  'tb_scrap_requests',
+  'tb_emergency_requests',
+  'tb_user'
+];
+
 export default function App() {
   // Portal Mode: customer, shopkeeper, admin, driver, delivery, service_provider, employer
   const [portalMode, setPortalMode] = useState<PortalMode>(() => {
@@ -222,25 +247,14 @@ export default function App() {
     }
   });
 
-  // Customer Cart State
-  const [cart, setCart] = useState<CartItem[]>(() => {
-    try {
-      const saved = localStorage.getItem('tb_cart');
-      return saved ? JSON.parse(saved) : [{ product: ALL_PRODUCTS[0], quantity: 1 }];
-    } catch {
-      return [{ product: ALL_PRODUCTS[0], quantity: 1 }];
-    }
-  });
+  // Customer Cart State (never restored from shared global localStorage)
+  const [cart, setCart] = useState<CartItem[]>([]);
 
-  // Orders State (Shared across Customer, Shopkeeper, Admin, Delivery)
-  const [orders, setOrders] = useState<Order[]>(() => {
-    try {
-      const saved = localStorage.getItem('tb_orders');
-      return saved ? JSON.parse(saved) : INITIAL_ORDERS;
-    } catch {
-      return INITIAL_ORDERS;
-    }
-  });
+  // Customer-only Orders State (strictly isolated by authenticated Firebase UID)
+  const [customerOrders, setCustomerOrders] = useState<Order[]>([]);
+
+  // Partner & Admin Orders State (isolated from customer UI)
+  const [orders, setOrders] = useState<Order[]>([]);
 
   // DRIVERS STATE (Taxi, Auto, Toto ONLY - No bike taxi)
   const [drivers, setDrivers] = useState<Driver[]>(() => {
@@ -255,15 +269,8 @@ export default function App() {
   // Active driver for Driver Dashboard simulation
   const [currentDriver, setCurrentDriver] = useState<Driver>(() => drivers[0] || INITIAL_DRIVERS[0]);
 
-  // RIDE BOOKINGS STATE
-  const [rideBookings, setRideBookings] = useState<RideBooking[]>(() => {
-    try {
-      const saved = localStorage.getItem('tb_ride_bookings');
-      return saved ? JSON.parse(saved) : INITIAL_RIDE_BOOKINGS;
-    } catch {
-      return INITIAL_RIDE_BOOKINGS;
-    }
-  });
+  // RIDE BOOKINGS STATE (never seeded from demo bookings or shared localStorage)
+  const [rideBookings, setRideBookings] = useState<RideBooking[]>([]);
 
   // DELIVERY FLEET STATE
   const [deliveryPersons, setDeliveryPersons] = useState<DeliveryPerson[]>(() => {
@@ -292,15 +299,8 @@ export default function App() {
   const syncedRemoteProviderIdsRef = useRef<Set<string>>(new Set());
   const syncedRemoteJobIdsRef = useRef<Set<string>>(new Set());
 
-  // PARCEL DELIVERIES
-  const [deliveries, setDeliveries] = useState<DeliveryRequest[]>(() => {
-    try {
-      const saved = localStorage.getItem('tb_deliveries');
-      return saved ? JSON.parse(saved) : INITIAL_DELIVERY_REQUESTS;
-    } catch {
-      return INITIAL_DELIVERY_REQUESTS;
-    }
-  });
+  // PARCEL DELIVERIES (never seeded from demo data or shared localStorage)
+  const [deliveries, setDeliveries] = useState<DeliveryRequest[]>([]);
 
   // SERVICE PROVIDERS
   const [serviceProviders, setServiceProviders] = useState<ServiceProvider[]>(() => {
@@ -314,15 +314,8 @@ export default function App() {
 
   const [currentProvider, setCurrentProvider] = useState<ServiceProvider>(() => serviceProviders[0] || INITIAL_SERVICE_PROVIDERS[0]);
 
-  // SERVICE REQUESTS
-  const [serviceRequests, setServiceRequests] = useState<ServiceRequest[]>(() => {
-    try {
-      const saved = localStorage.getItem('tb_service_requests');
-      return saved ? JSON.parse(saved) : INITIAL_SERVICE_REQUESTS;
-    } catch {
-      return INITIAL_SERVICE_REQUESTS;
-    }
-  });
+  // SERVICE REQUESTS (never seeded from demo data or shared localStorage)
+  const [serviceRequests, setServiceRequests] = useState<ServiceRequest[]>([]);
 
   // JOB LISTINGS & APPLICATIONS
   const [jobListings, setJobListings] = useState<JobListing[]>(() => {
@@ -343,15 +336,8 @@ export default function App() {
     }
   });
 
-  // COMPLAINTS & GRIEVANCES
-  const [complaints, setComplaints] = useState<Complaint[]>(() => {
-    try {
-      const saved = localStorage.getItem('tb_complaints');
-      return saved ? JSON.parse(saved) : INITIAL_COMPLAINTS;
-    } catch {
-      return INITIAL_COMPLAINTS;
-    }
-  });
+  // COMPLAINTS & GRIEVANCES (never seeded from demo data or shared localStorage)
+  const [complaints, setComplaints] = useState<Complaint[]>([]);
 
   // ADMIN AUDIT LOGS
   const [adminActivities, setAdminActivities] = useState<AdminActivity[]>(() => {
@@ -373,15 +359,8 @@ export default function App() {
     }
   });
 
-  // Customer User Profile
-  const [user, setUser] = useState<UserProfile>(() => {
-    try {
-      const saved = localStorage.getItem('tb_user');
-      return saved ? JSON.parse(saved) : INITIAL_USER;
-    } catch {
-      return INITIAL_USER;
-    }
-  });
+  // Customer User Profile (never restored from stale localStorage or INITIAL_USER)
+  const [user, setUser] = useState<UserProfile>(() => createGuestUserProfile());
 
   // Language state: 'en' | 'hi' | 'bn'
   const [language, setLanguage] = useState<LanguageCode>(() => {
@@ -422,15 +401,8 @@ export default function App() {
     }
   });
 
-  // Scrap Marketplace Requests
-  const [scrapRequests, setScrapRequests] = useState<ScrapRequest[]>(() => {
-    try {
-      const saved = localStorage.getItem('tb_scrap_requests');
-      return saved ? JSON.parse(saved) : INITIAL_SCRAP_REQUESTS;
-    } catch {
-      return INITIAL_SCRAP_REQUESTS;
-    }
-  });
+  // Scrap Marketplace Requests (never seeded from demo data or shared localStorage)
+  const [scrapRequests, setScrapRequests] = useState<ScrapRequest[]>([]);
 
   // DOCTORS STATE
   const [doctors, setDoctors] = useState<Doctor[]>(() => {
@@ -444,15 +416,15 @@ export default function App() {
 
   const [currentDoctor, setCurrentDoctor] = useState<Doctor>(() => doctors[0] || INITIAL_DOCTORS[0]);
 
-  // EMERGENCY DOCTOR REQUESTS
-  const [emergencyDoctorRequests, setEmergencyDoctorRequests] = useState<EmergencyDoctorRequest[]>(() => {
-    try {
-      const saved = localStorage.getItem('tb_emergency_requests');
-      return saved ? JSON.parse(saved) : INITIAL_EMERGENCY_REQUESTS;
-    } catch {
-      return INITIAL_EMERGENCY_REQUESTS;
-    }
-  });
+  // EMERGENCY DOCTOR REQUESTS (never seeded from demo data or shared localStorage)
+  const [emergencyDoctorRequests, setEmergencyDoctorRequests] = useState<EmergencyDoctorRequest[]>([]);
+
+  const previousAuthUidRef = useRef<string | null>(auth.currentUser?.uid || null);
+  const syncedShopOrderIdsRef = useRef<Set<string>>(new Set());
+  const syncedRiderOrderIdsRef = useRef<Set<string>>(new Set());
+  const syncedRiderDeliveryIdsRef = useRef<Set<string>>(new Set());
+  const customerServiceRequestsRef = useRef<ServiceRequest[]>([]);
+  const providerServiceRequestsRef = useRef<ServiceRequest[]>([]);
 
   // Modals & Panels
   const [isCartOpen, setIsCartOpen] = useState(false);
@@ -582,9 +554,41 @@ export default function App() {
     return mergeById(retained, remoteList);
   };
 
+  const clearCustomerScopedState = () => {
+    setCustomerOrders([]);
+    setOrders([]);
+    setTrackedOrder(null);
+    setCart([]);
+    setComplaints([]);
+    setRideBookings([]);
+    setDeliveries([]);
+    setServiceRequests([]);
+    setScrapRequests([]);
+    setEmergencyDoctorRequests([]);
+    customerServiceRequestsRef.current = [];
+    providerServiceRequestsRef.current = [];
+    syncedShopOrderIdsRef.current.clear();
+    syncedRiderOrderIdsRef.current.clear();
+    syncedRiderDeliveryIdsRef.current.clear();
+    try {
+      CUSTOMER_LOCAL_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+    } catch (e) {
+      console.warn(e);
+    }
+  };
+
+  // Clear any legacy globally shared customer localStorage keys on initial mount
+  useEffect(() => {
+    try {
+      CUSTOMER_LOCAL_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+    } catch (e) {
+      console.warn(e);
+    }
+  }, []);
+
   // Synchronize Firebase Auth session across app reloads (Spark ₹0 plan)
-  // Never assume authentication solely from tb_user in localStorage.
-  // Never mark Firebase Anonymous Auth as phone-verified or account-verified.
+  // Never assume authentication solely from localStorage or INITIAL_USER.
+  // Clear all customer-scoped state whenever Firebase UID changes or logs out.
   useEffect(() => {
     // Process Google Sign-In redirect result (mobile PWA fallback when popups are blocked)
     getRedirectResult(auth)
@@ -668,6 +672,14 @@ export default function App() {
       });
 
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      const nextUid = fbUser?.uid || null;
+      const uidChanged = previousAuthUidRef.current !== nextUid;
+      previousAuthUidRef.current = nextUid;
+
+      if (uidChanged || !fbUser) {
+        clearCustomerScopedState();
+      }
+
       setFirebaseUser(fbUser);
       if (fbUser) {
         const isVerifiedAdminUser =
@@ -709,29 +721,23 @@ export default function App() {
         }
         setUser((prev) => {
           const isSameUid = Boolean(prev.id && prev.id === fbUser.uid);
+          const guestBase = createGuestUserProfile(currentLocation, currentPincode, prev.language || 'en');
           const cleanBase: UserProfile = remoteProfile
-            ? { ...(isSameUid ? prev : INITIAL_USER), ...remoteProfile }
+            ? { ...(isSameUid ? prev : guestBase), ...remoteProfile }
             : isSameUid
               ? prev
               : {
-                  ...INITIAL_USER,
+                  ...guestBase,
                   id: fbUser.uid,
                   userId: fbUser.uid,
                   name: fbUser.displayName || (fbUser.isAnonymous ? 'Guest Shopper' : 'Customer'),
                   phone: fbUser.phoneNumber || '',
-                  email: fbUser.email || '',
-                  address: '',
-                  location: currentLocation,
-                  pincode: currentPincode,
-                  language: prev.language || 'en',
-                  wishlist: [],
-                  emergencyContact: undefined,
-                  gpsCoordinates: undefined
+                  email: fbUser.email || ''
                 };
           const rawPhone = remoteProfile?.phone || cleanBase.phone || fbUser.phoneNumber || '';
           const effectivePhone = normalizePhoneE164(rawPhone) || rawPhone;
           const flags = getAuthFlags(fbUser, effectivePhone);
-          const updated: UserProfile = {
+          return {
             ...cleanBase,
             name: remoteProfile?.name || cleanBase.name || fbUser.displayName || 'Customer',
             email: remoteProfile?.email || cleanBase.email || fbUser.email || '',
@@ -740,16 +746,10 @@ export default function App() {
             userId: fbUser.uid,
             ...flags
           };
-          try { localStorage.setItem('tb_user', JSON.stringify(updated)); } catch (e) { console.warn(e); }
-          return updated;
         });
       } else {
         setAdminCustomers([]);
-        const flags = getAuthFlags(null);
-        setUser((prev) => ({
-          ...prev,
-          ...flags
-        }));
+        setUser((prev) => createGuestUserProfile(currentLocation, currentPincode, prev.language || 'en'));
       }
     });
 
@@ -810,23 +810,8 @@ export default function App() {
     }
   }, [products]);
 
-  // Persist Cart
-  useEffect(() => {
-    try {
-      localStorage.setItem('tb_cart', JSON.stringify(cart));
-    } catch (e) {
-      console.warn(e);
-    }
-  }, [cart]);
-
-  // Persist Orders
-  useEffect(() => {
-    try {
-      localStorage.setItem('tb_orders', JSON.stringify(orders));
-    } catch (e) {
-      console.warn(e);
-    }
-  }, [orders]);
+  // Customer-scoped data (cart, orders, rideBookings, deliveries, serviceRequests,
+  // user, emergencyDoctorRequests) is NEVER persisted to globally shared localStorage keys.
 
   // Persist Drivers
   useEffect(() => {
@@ -837,34 +822,23 @@ export default function App() {
     }
   }, [drivers]);
 
-  // Persist Ride Bookings
+  // Persist Delivery Persons
   useEffect(() => {
     try {
-      localStorage.setItem('tb_ride_bookings', JSON.stringify(rideBookings));
-    } catch (e) {
-      console.warn(e);
-    }
-  }, [rideBookings]);
-
-  // Persist Deliveries & Delivery Persons
-  useEffect(() => {
-    try {
-      localStorage.setItem('tb_deliveries', JSON.stringify(deliveries));
       localStorage.setItem('tb_delivery_persons', JSON.stringify(deliveryPersons));
     } catch (e) {
       console.warn(e);
     }
-  }, [deliveries, deliveryPersons]);
+  }, [deliveryPersons]);
 
-  // Persist Services
+  // Persist Service Providers
   useEffect(() => {
     try {
       localStorage.setItem('tb_service_providers', JSON.stringify(serviceProviders));
-      localStorage.setItem('tb_service_requests', JSON.stringify(serviceRequests));
     } catch (e) {
       console.warn(e);
     }
-  }, [serviceProviders, serviceRequests]);
+  }, [serviceProviders]);
 
   // Persist Jobs
   useEffect(() => {
@@ -876,15 +850,6 @@ export default function App() {
     }
   }, [jobListings, jobApplications]);
 
-  // Persist User
-  useEffect(() => {
-    try {
-      localStorage.setItem('tb_user', JSON.stringify(user));
-    } catch (e) {
-      console.warn(e);
-    }
-  }, [user]);
-
   // Persist Doctors
   useEffect(() => {
     try {
@@ -893,15 +858,6 @@ export default function App() {
       console.warn(e);
     }
   }, [doctors]);
-
-  // Persist Emergency Doctor Requests
-  useEffect(() => {
-    try {
-      localStorage.setItem('tb_emergency_requests', JSON.stringify(emergencyDoctorRequests));
-    } catch (e) {
-      console.warn(e);
-    }
-  }, [emergencyDoctorRequests]);
 
   // Clear sensitive admin-only state whenever verified Admin session is not active
   useEffect(() => {
@@ -947,13 +903,9 @@ export default function App() {
     setAdminCustomers([]);
     setAdminActivities([]);
     setIsAdminAuthModalOpen(false);
+    clearCustomerScopedState();
     await handleAuthSignOut();
-    try {
-      localStorage.removeItem('tb_user');
-    } catch (e) {
-      console.warn(e);
-    }
-    setUser(INITIAL_USER);
+    setUser(createGuestUserProfile(currentLocation, currentPincode, language));
     setPortalMode('customer');
   };
 
@@ -1162,6 +1114,18 @@ export default function App() {
           }
         },
         (err) => console.warn('Firestore publicRiders listener:', err.message)
+      ),
+      // Strictly isolated customer orders listener (replaces directly from UID's Firestore snapshot, even when empty)
+      onSnapshot(
+        query(collection(db, 'orders'), where('customerId', '==', uid)),
+        (snap) => {
+          const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() } as Order));
+          setCustomerOrders(docs);
+        },
+        (err) => {
+          console.warn('Customer orders listener:', err.message);
+          setCustomerOrders([]);
+        }
       )
     ];
 
@@ -1178,21 +1142,13 @@ export default function App() {
           setAdminActivities(list);
         }, (err) => console.warn('Admin activity listener:', err.message)),
         onSnapshot(collection(db, 'orders'), (snap) => {
-          if (!snap.empty) {
-            setOrders((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as Order))));
-          }
+          setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() } as Order)));
         }, (err) => console.warn('Admin orders listener:', err.message)),
         onSnapshot(collection(db, 'complaints'), (snap) => {
-          if (!snap.empty) {
-            setComplaints((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as Complaint))));
-          }
+          setComplaints(snap.docs.map((d) => ({ id: d.id, ...d.data() } as Complaint)));
         }, (err) => console.warn('Admin complaints listener:', err.message)),
         onSnapshot(collection(db, 'emergencyDoctorRequests'), (snap) => {
-          if (!snap.empty) {
-            setEmergencyDoctorRequests((prev) =>
-              mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as EmergencyDoctorRequest)))
-            );
-          }
+          setEmergencyDoctorRequests(snap.docs.map((d) => ({ id: d.id, ...d.data() } as EmergencyDoctorRequest)));
         }, (err) => console.warn('Admin emergency requests listener:', err.message)),
         onSnapshot(collection(db, 'shops'), (snap) => {
           if (!snap.empty) {
@@ -1225,9 +1181,7 @@ export default function App() {
           }
         }, (err) => console.warn('Admin serviceProviders listener:', err.message)),
         onSnapshot(collection(db, 'serviceRequests'), (snap) => {
-          if (!snap.empty) {
-            setServiceRequests((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as ServiceRequest))));
-          }
+          setServiceRequests(snap.docs.map((d) => ({ id: d.id, ...d.data() } as ServiceRequest)));
         }, (err) => console.warn('Admin serviceRequests listener:', err.message)),
         onSnapshot(collection(db, 'jobs'), (snap) => {
           if (!snap.empty) {
@@ -1240,104 +1194,74 @@ export default function App() {
           }
         }, (err) => console.warn('Admin jobApplications listener:', err.message)),
         onSnapshot(collection(db, 'scrapRequests'), (snap) => {
-          if (!snap.empty) {
-            setScrapRequests((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as ScrapRequest))));
-          }
+          setScrapRequests(snap.docs.map((d) => ({ id: d.id, ...d.data() } as ScrapRequest)));
         }, (err) => console.warn('Admin scrapRequests listener:', err.message)),
         onSnapshot(collection(db, 'rideBookings'), (snap) => {
-          if (!snap.empty) {
-            setRideBookings((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as RideBooking))));
-          }
+          setRideBookings(snap.docs.map((d) => ({ id: d.id, ...d.data() } as RideBooking)));
         }, (err) => console.warn('Admin rideBookings listener:', err.message)),
         onSnapshot(collection(db, 'deliveries'), (snap) => {
-          if (!snap.empty) {
-            setDeliveries((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as DeliveryRequest))));
-          }
+          setDeliveries(snap.docs.map((d) => ({ id: d.id, ...d.data() } as DeliveryRequest)));
         }, (err) => console.warn('Admin deliveries listener:', err.message))
       );
     } else {
+      const combineServiceRequests = () => {
+        const map = new Map<string, ServiceRequest>();
+        customerServiceRequestsRef.current.forEach((r) => map.set(r.id, r));
+        providerServiceRequestsRef.current.forEach((r) => map.set(r.id, r));
+        setServiceRequests(Array.from(map.values()));
+      };
+
       unsubs.push(
-        onSnapshot(
-          query(collection(db, 'orders'), where('customerId', '==', uid)),
-          (snap) => {
-            if (!snap.empty) {
-              setOrders((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as Order))));
-            }
-          },
-          (err) => console.warn('Customer orders listener:', err.message)
-        ),
         onSnapshot(
           query(collection(db, 'complaints'), where('userId', '==', uid)),
           (snap) => {
-            if (!snap.empty) {
-              setComplaints((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as Complaint))));
-            }
+            setComplaints(snap.docs.map((d) => ({ id: d.id, ...d.data() } as Complaint)));
           },
           (err) => console.warn('Customer complaints listener:', err.message)
         ),
         onSnapshot(
           query(collection(db, 'emergencyDoctorRequests'), where('patientUserId', '==', uid)),
           (snap) => {
-            if (!snap.empty) {
-              setEmergencyDoctorRequests((prev) =>
-                mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as EmergencyDoctorRequest)))
-              );
-            }
+            setEmergencyDoctorRequests(
+              snap.docs.map((d) => ({ id: d.id, ...d.data() } as EmergencyDoctorRequest))
+            );
           },
           (err) => console.warn('Customer emergency requests listener:', err.message)
         ),
         onSnapshot(
           query(collection(db, 'rideBookings'), where('customerId', '==', uid)),
           (snap) => {
-            if (!snap.empty) {
-              setRideBookings((prev) =>
-                mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as RideBooking)))
-              );
-            }
+            setRideBookings(snap.docs.map((d) => ({ id: d.id, ...d.data() } as RideBooking)));
           },
           (err) => console.warn('Customer rides listener:', err.message)
         ),
         onSnapshot(
           query(collection(db, 'deliveries'), where('customerId', '==', uid)),
           (snap) => {
-            if (!snap.empty) {
-              setDeliveries((prev) =>
-                mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as DeliveryRequest)))
-              );
-            }
+            setDeliveries(snap.docs.map((d) => ({ id: d.id, ...d.data() } as DeliveryRequest)));
           },
           (err) => console.warn('Customer deliveries listener:', err.message)
         ),
         onSnapshot(
           query(collection(db, 'scrapRequests'), where('customerId', '==', uid)),
           (snap) => {
-            if (!snap.empty) {
-              setScrapRequests((prev) =>
-                mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as ScrapRequest)))
-              );
-            }
+            setScrapRequests(snap.docs.map((d) => ({ id: d.id, ...d.data() } as ScrapRequest)));
           },
           (err) => console.warn('Customer scrap listener:', err.message)
         ),
         onSnapshot(
           query(collection(db, 'serviceRequests'), where('customerId', '==', uid)),
           (snap) => {
-            if (!snap.empty) {
-              setServiceRequests((prev) =>
-                mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as ServiceRequest)))
-              );
-            }
+            customerServiceRequestsRef.current = snap.docs.map((d) => ({ id: d.id, ...d.data() } as ServiceRequest));
+            combineServiceRequests();
           },
           (err) => console.warn('Customer serviceRequests listener:', err.message)
         ),
         onSnapshot(
           query(collection(db, 'serviceRequests'), where('providerOwnerId', '==', uid)),
           (snap) => {
-            if (!snap.empty) {
-              setServiceRequests((prev) =>
-                mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as ServiceRequest)))
-              );
-            }
+            providerServiceRequestsRef.current = snap.docs.map((d) => ({ id: d.id, ...d.data() } as ServiceRequest));
+            combineServiceRequests();
           },
           (err) => console.warn('Provider serviceRequests listener:', err.message)
         ),
@@ -1446,9 +1370,8 @@ export default function App() {
         onSnapshot(
           query(collection(db, 'orders'), where('shopId', '==', shop.id)),
           (snap) => {
-            if (!snap.empty) {
-              setOrders((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as Order))));
-            }
+            const remoteShopOrders = snap.docs.map((d) => ({ id: d.id, ...d.data() } as Order));
+            setOrders((prev) => mergeWithRemoteEviction(prev, remoteShopOrders, syncedShopOrderIdsRef));
           },
           (err) => console.warn('Shopkeeper orders listener:', err.message)
         )
@@ -1464,20 +1387,16 @@ export default function App() {
         onSnapshot(
           query(collection(db, 'deliveries'), where('assignedDeliveryPersonId', 'in', riderChunk)),
           (snap) => {
-            if (!snap.empty) {
-              setDeliveries((prev) =>
-                mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as DeliveryRequest)))
-              );
-            }
+            const remoteDeliveries = snap.docs.map((d) => ({ id: d.id, ...d.data() } as DeliveryRequest));
+            setDeliveries((prev) => mergeWithRemoteEviction(prev, remoteDeliveries, syncedRiderDeliveryIdsRef));
           },
           (err) => console.warn('Rider deliveries listener:', err.message)
         ),
         onSnapshot(
           query(collection(db, 'orders'), where('riderId', 'in', riderChunk)),
           (snap) => {
-            if (!snap.empty) {
-              setOrders((prev) => mergeById(prev, snap.docs.map((d) => ({ id: d.id, ...d.data() } as Order))));
-            }
+            const remoteRiderOrders = snap.docs.map((d) => ({ id: d.id, ...d.data() } as Order));
+            setOrders((prev) => mergeWithRemoteEviction(prev, remoteRiderOrders, syncedRiderOrderIdsRef));
           },
           (err) => console.warn('Rider assigned orders listener:', err.message)
         )
@@ -1562,15 +1481,7 @@ export default function App() {
       ...req,
       customerId: authUid || req.customerId || ''
     };
-    setScrapRequests((prev) => {
-      const updated = [enrichedReq, ...prev];
-      try {
-        localStorage.setItem('tb_scrap_requests', JSON.stringify(updated));
-      } catch (e) {
-        console.warn(e);
-      }
-      return updated;
-    });
+    setScrapRequests((prev) => [enrichedReq, ...prev]);
     if (authUid) {
       safeSetDoc(doc(db, 'scrapRequests', enrichedReq.id), enrichedReq).catch((err) => console.warn(err));
     }
@@ -1583,8 +1494,8 @@ export default function App() {
       return;
     }
     const targetId = offer.requestId || offer.scrapRequestId;
-    setScrapRequests((prev) => {
-      const updated = prev.map((req) => {
+    setScrapRequests((prev) =>
+      prev.map((req) => {
         if (req.id === targetId) {
           const currentOffers = req.offers || [];
           return {
@@ -1594,14 +1505,8 @@ export default function App() {
           };
         }
         return req;
-      });
-      try {
-        localStorage.setItem('tb_scrap_requests', JSON.stringify(updated));
-      } catch (e) {
-        console.warn(e);
-      }
-      return updated;
-    });
+      })
+    );
   };
 
   // BACKEND REQUIRED: Offer acceptance & buyer assignment require Cloud Functions.
@@ -1616,8 +1521,8 @@ export default function App() {
       console.warn('Scrap offer acceptance requires BACKEND REQUIRED (Cloud Functions).');
       return;
     }
-    setScrapRequests((prev) => {
-      const updated = prev.map((req) => {
+    setScrapRequests((prev) =>
+      prev.map((req) => {
         if (req.id === requestId) {
           return {
             ...req,
@@ -1629,28 +1534,16 @@ export default function App() {
           };
         }
         return req;
-      });
-      try {
-        localStorage.setItem('tb_scrap_requests', JSON.stringify(updated));
-      } catch (e) {
-        console.warn(e);
-      }
-      return updated;
-    });
+      })
+    );
   };
 
   const handleUpdateScrapStatus = (requestId: string, status: ScrapRequest['status']) => {
     if (!isAdminAuthenticated && status !== 'cancelled') return;
     const updatedAt = new Date().toISOString();
-    setScrapRequests((prev) => {
-      const updated = prev.map((req) => (req.id === requestId ? { ...req, status, updatedAt } : req));
-      try {
-        localStorage.setItem('tb_scrap_requests', JSON.stringify(updated));
-      } catch (e) {
-        console.warn(e);
-      }
-      return updated;
-    });
+    setScrapRequests((prev) =>
+      prev.map((req) => (req.id === requestId ? { ...req, status, updatedAt } : req))
+    );
     if (auth.currentUser) {
       safeUpdateDoc(doc(db, 'scrapRequests', requestId), { status, updatedAt }).catch((err) => console.warn(err));
     }
@@ -1672,6 +1565,11 @@ export default function App() {
   // On Spark (₹0), client submits order math matching (subtotal + deliveryFee - discount == total); Firestore rules verify approved shopId.
   const handlePlaceOrder = async (orderOrAddress: Order | string, paymentMethod?: string) => {
     const authUid = await resolveAuthUid();
+    if (!authUid) {
+      setCustomerAuthInitialStep('login');
+      setIsCustomerAuthModalOpen(true);
+      return;
+    }
 
     if (typeof orderOrAddress === 'object') {
       const matchedShop = shops.find((s) => s.id === orderOrAddress.shopId);
@@ -1679,15 +1577,14 @@ export default function App() {
       const newOrder: Order = {
         ...orderOrAddress,
         ...(resolvedOwnerId ? { shopOwnerId: resolvedOwnerId } : {}),
-        customerId: authUid || orderOrAddress.customerId || ''
+        customerId: authUid
       };
-      setOrders((prev) => [newOrder, ...prev]);
+      setCustomerOrders((prev) => [newOrder, ...prev.filter((o) => o.id !== newOrder.id)]);
+      setOrders((prev) => [newOrder, ...prev.filter((o) => o.id !== newOrder.id)]);
       setCart([]);
       setIsCartOpen(false);
       setTrackedOrder(newOrder);
-      if (authUid) {
-        safeSetDoc(doc(db, 'orders', newOrder.id), newOrder).catch((err) => console.warn(err));
-      }
+      safeSetDoc(doc(db, 'orders', newOrder.id), newOrder).catch((err) => console.warn(err));
       return;
     }
 
@@ -1717,7 +1614,7 @@ export default function App() {
         shopId: orderShopId,
         ...(resolvedOwnerId ? { shopOwnerId: resolvedOwnerId } : {}),
         shopName: matchedShop.name,
-        customerId: authUid || '',
+        customerId: authUid,
         customerName: user.name || 'Customer',
         customerPhone: user.phone || '',
         items: shopItems,
@@ -1735,15 +1632,14 @@ export default function App() {
         createdAt: new Date().toISOString()
       };
 
-      if (authUid) {
-        safeSetDoc(doc(db, 'orders', orderId), newOrder).catch((err) => {
-          console.warn('Firestore order sync warning:', err.message);
-        });
-      }
+      safeSetDoc(doc(db, 'orders', orderId), newOrder).catch((err) => {
+        console.warn('Firestore order sync warning:', err.message);
+      });
 
       return newOrder;
     });
 
+    setCustomerOrders((prev) => [...newOrdersList, ...prev]);
     setOrders((prev) => [...newOrdersList, ...prev]);
 
     // Update product stock counts locally (authoritative server decrement requires BACKEND REQUIRED)
@@ -1785,8 +1681,8 @@ export default function App() {
       return;
     }
 
-    setOrders((prev) =>
-      prev.map((o) =>
+    const applyOrderPatch = (list: Order[]) =>
+      list.map((o) =>
         o.id === orderId
           ? {
               ...o,
@@ -1798,8 +1694,10 @@ export default function App() {
               updatedAt
             }
           : o
-      )
-    );
+      );
+
+    setOrders(applyOrderPatch);
+    setCustomerOrders(applyOrderPatch);
     if (auth.currentUser) {
       safeUpdateDoc(doc(db, 'orders', orderId), {
         status,
@@ -2702,11 +2600,6 @@ export default function App() {
     setUser(finalUser);
     if (finalUser.location) setCurrentLocation(finalUser.location);
     if (finalUser.pincode) setCurrentPincode(finalUser.pincode);
-    try {
-      localStorage.setItem('tb_user', JSON.stringify(finalUser));
-    } catch (e) {
-      console.warn(e);
-    }
   };
 
   const handleRegisterDriver = async (driverData: Omit<Driver, 'id'>) => {
@@ -2742,9 +2635,15 @@ export default function App() {
     }
   };
 
+  const activeCustomerUid = firebaseUser?.uid || null;
+
+  const scopedCustomerOrders = activeCustomerUid
+    ? customerOrders.filter((o) => o.customerId === activeCustomerUid)
+    : [];
+
   const handleOpenActiveTracker = () => {
-    if (orders.length > 0) {
-      setTrackedOrder(orders[0]);
+    if (scopedCustomerOrders.length > 0) {
+      setTrackedOrder(scopedCustomerOrders[0]);
     } else {
       setCurrentTab('orders');
     }
@@ -2767,8 +2666,8 @@ export default function App() {
     ? [...filteredByLocality.localProducts, ...filteredByLocality.nearbyProducts]
     : approvedProducts;
 
-  const activeOrdersCount = orders.filter(
-    (o) => ['pending', 'confirmed', 'preparing', 'ready_for_dispatch', 'packed', 'out_for_delivery'].includes(o.status)
+  const activeOrdersCount = scopedCustomerOrders.filter(
+    (o) => ['pending', 'placed', 'confirmed', 'preparing', 'ready_for_dispatch', 'packed', 'out_for_delivery'].includes(o.status)
   ).length;
 
   const totalCartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
@@ -3314,7 +3213,8 @@ export default function App() {
 
               {currentTab === 'orders' && (
                 <OrdersView
-                  orders={orders}
+                  orders={scopedCustomerOrders}
+                  currentCustomerUid={activeCustomerUid}
                   onBackToHome={() => handleTabChange('home')}
                   onTrackOrder={(order) => setTrackedOrder(order)}
                 />
@@ -3358,24 +3258,9 @@ export default function App() {
                   onTrackOrder={handleOpenActiveTracker}
                   onOpenCart={() => setIsCartOpen(true)}
                   onLogout={async () => {
+                    clearCustomerScopedState();
                     await handleAuthSignOut();
-                    try { localStorage.removeItem('tb_user'); } catch (e) { console.warn(e); }
-                    setUser({
-                      ...INITIAL_USER,
-                      id: '',
-                      userId: '',
-                      name: 'Guest Customer',
-                      phone: '',
-                      email: '',
-                      address: '',
-                      location: currentLocation,
-                      pincode: currentPincode,
-                      language: user.language || 'en',
-                      isSessionAuthenticated: false,
-                      isPhoneVerified: false,
-                      isVerified: false,
-                      authMethod: 'none'
-                    });
+                    setUser(createGuestUserProfile(currentLocation, currentPincode, user.language || 'en'));
                     setCustomerAuthInitialStep('login');
                     setIsCustomerAuthModalOpen(true);
                   }}
@@ -3418,9 +3303,9 @@ export default function App() {
         />
 
         <OrderTrackingModal
-          isOpen={trackedOrder !== null}
+          isOpen={trackedOrder !== null && Boolean(activeCustomerUid) && trackedOrder.customerId === activeCustomerUid}
           onClose={() => setTrackedOrder(null)}
-          order={trackedOrder}
+          order={trackedOrder && activeCustomerUid && trackedOrder.customerId === activeCustomerUid ? trackedOrder : null}
         />
 
         <LocationModal
@@ -3476,24 +3361,9 @@ export default function App() {
           user={user}
           onLogout={async () => {
             setIsSideDrawerOpen(false);
+            clearCustomerScopedState();
             await handleAuthSignOut();
-            try { localStorage.removeItem('tb_user'); } catch (e) { console.warn(e); }
-            setUser({
-              ...INITIAL_USER,
-              id: '',
-              userId: '',
-              name: 'Guest Customer',
-              phone: '',
-              email: '',
-              address: '',
-              location: currentLocation,
-              pincode: currentPincode,
-              language: user.language || 'en',
-              isSessionAuthenticated: false,
-              isPhoneVerified: false,
-              isVerified: false,
-              authMethod: 'none'
-            });
+            setUser(createGuestUserProfile(currentLocation, currentPincode, user.language || 'en'));
             setCustomerAuthInitialStep('login');
             setIsCustomerAuthModalOpen(true);
           }}
