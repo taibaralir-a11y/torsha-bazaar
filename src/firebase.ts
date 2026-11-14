@@ -17,9 +17,15 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 
 const LOGOUT_FLAG_KEY = 'tb_explicit_logout';
+let inFlightAuthPromise: Promise<User | null> | null = null;
+let lastAuthError: { code?: string; message?: string } | null = null;
+
+export function getLastAuthError() {
+  return lastAuthError;
+}
 
 /**
- * Ensures a valid cryptographic Firebase Auth session is active.
+ * Ensures a valid cryptographic Firebase Auth session is active for guest/partner convenience.
  * Waits for Firebase Auth persistence restoration first so existing UIDs
  * are reused across sessions without creating duplicate anonymous accounts.
  * Operates at ₹0 on Firebase Spark Plan.
@@ -32,6 +38,7 @@ export async function ensureAuthSession(forceCreate = false): Promise<User | nul
   }
 
   if (auth.currentUser) {
+    lastAuthError = null;
     try { sessionStorage.removeItem(LOGOUT_FLAG_KEY); } catch {}
     return auth.currentUser;
   }
@@ -46,14 +53,29 @@ export async function ensureAuthSession(forceCreate = false): Promise<User | nul
     return null;
   }
 
-  try {
-    const cred = await signInAnonymously(auth);
-    try { sessionStorage.removeItem(LOGOUT_FLAG_KEY); } catch {}
-    return cred.user;
-  } catch (err: any) {
-    console.warn('Firebase Anonymous Auth notice:', err?.code || err?.message || err);
-    return auth.currentUser;
+  if (inFlightAuthPromise) {
+    return inFlightAuthPromise;
   }
+
+  inFlightAuthPromise = (async () => {
+    try {
+      const cred = await signInAnonymously(auth);
+      lastAuthError = null;
+      try { sessionStorage.removeItem(LOGOUT_FLAG_KEY); } catch {}
+      return cred.user;
+    } catch (err: any) {
+      lastAuthError = {
+        code: err?.code,
+        message: err?.message
+      };
+      console.warn('Firebase Anonymous Auth notice:', err?.code || err?.message || err);
+      return auth.currentUser;
+    } finally {
+      inFlightAuthPromise = null;
+    }
+  })();
+
+  return inFlightAuthPromise;
 }
 
 export function getCurrentAuthUid(): string | null {
@@ -66,6 +88,7 @@ export function getCurrentUserEmail(): string | null {
 
 export async function handleAuthSignOut(): Promise<void> {
   try {
+    lastAuthError = null;
     try { sessionStorage.setItem(LOGOUT_FLAG_KEY, 'true'); } catch {}
     await signOut(auth);
   } catch (err) {

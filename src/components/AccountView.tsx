@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   User, 
   Phone, 
@@ -85,6 +85,34 @@ export const AccountView: React.FC<AccountViewProps> = ({
   const [emergencyContactPhone, setEmergencyContactPhone] = useState(emergencyPhoneInitial || '');
   const [gpsDetecting, setGpsDetecting] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+
+  useEffect(() => {
+    if (!isEditing) {
+      setName(user.name || '');
+      setPhone(user.phone || '');
+      setEmail(user.email || '');
+      setStateName(user.state || 'West Bengal');
+      setDistrict(user.district || 'Alipurduar');
+      setBlock(user.block || 'Kalchini');
+      setSelectedLocality(user.location || 'Satali');
+      setPincode(user.pincode || '735214');
+      setAddress(user.address || '');
+      setLanguage(user.language || 'en');
+    }
+  }, [
+    isEditing,
+    user.id,
+    user.name,
+    user.phone,
+    user.email,
+    user.state,
+    user.district,
+    user.block,
+    user.location,
+    user.pincode,
+    user.address,
+    user.language
+  ]);
 
   // Complaint form state
   const [complaintType, setComplaintType] = useState<'order' | 'rider' | 'shop' | 'service'>('shop');
@@ -189,9 +217,22 @@ export const AccountView: React.FC<AccountViewProps> = ({
                   {user.location || 'Satali'}
                 </span>
               </h2>
-              <p className="text-xs text-emerald-100 flex items-center gap-1 mt-0.5">
+              <p className="text-xs text-emerald-100 flex items-center gap-1.5 mt-0.5 flex-wrap">
                 <Phone className="w-3 h-3 text-yellow-300" />
-                <span>{user.phone}</span>
+                <span>{user.phone || 'No phone saved'}</span>
+                {user.isPhoneVerified ? (
+                  <span className="text-[9px] font-bold bg-emerald-950/70 text-emerald-200 border border-emerald-400/40 px-1.5 py-0.2 rounded-full">
+                    OTP Verified
+                  </span>
+                ) : user.authMethod === 'google' ? (
+                  <span className="text-[9px] font-bold bg-emerald-950/70 text-emerald-200 border border-emerald-400/40 px-1.5 py-0.2 rounded-full">
+                    Google Verified
+                  </span>
+                ) : user.authMethod === 'email' ? (
+                  <span className="text-[9px] font-bold bg-emerald-950/70 text-emerald-200 border border-emerald-400/40 px-1.5 py-0.2 rounded-full">
+                    {user.isVerified ? 'Email Verified' : 'Email Signed In'}
+                  </span>
+                ) : null}
               </p>
               <p className="text-[11px] text-emerald-200 flex items-center gap-1 mt-0.5 truncate max-w-[220px]">
                 <MapPin className="w-3 h-3 text-yellow-300 shrink-0" />

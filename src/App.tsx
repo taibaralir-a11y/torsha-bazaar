@@ -466,6 +466,8 @@ export default function App() {
   const [isEmergencyDoctorModalOpen, setIsEmergencyDoctorModalOpen] = useState(false);
   const [isDoctorAuthModalOpen, setIsDoctorAuthModalOpen] = useState(false);
   const [isCustomerAuthModalOpen, setIsCustomerAuthModalOpen] = useState(false);
+  const [customerAuthError, setCustomerAuthError] = useState('');
+  const [customerAuthInitialStep, setCustomerAuthInitialStep] = useState<'login' | 'register' | 'forgot' | 'complete_profile'>('login');
   const [isDriverAuthModalOpen, setIsDriverAuthModalOpen] = useState(false);
   const [isAdminAuthModalOpen, setIsAdminAuthModalOpen] = useState(false);
   const isAdminAuthModalOpenRef = useRef(isAdminAuthModalOpen);
@@ -537,10 +539,11 @@ export default function App() {
     const hasExactPhoneMatch = phonesMatchNormalized(fbUser.phoneNumber, cleanPhone);
     const isPhoneVerified = hasExactPhoneMatch;
     const isVerified = Boolean(isPhoneVerified || fbUser.emailVerified);
+    const isGoogleProvider = fbUser.providerData?.some((p) => p.providerId === 'google.com');
     const authMethod: UserProfile['authMethod'] = hasExactPhoneMatch
       ? 'phone'
       : fbUser.email
-        ? (fbUser.providerData?.[0]?.providerId === 'google.com' ? 'google' : 'email')
+        ? (isGoogleProvider ? 'google' : 'email')
         : (fbUser.isAnonymous ? 'anonymous' : 'none');
     return {
       isSessionAuthenticated: true,
@@ -595,6 +598,35 @@ export default function App() {
             return false;
           }
         })();
+        const isPendingCustomerRedirect = (() => {
+          try {
+            return sessionStorage.getItem('tb_customer_google_pending') === 'true';
+          } catch {
+            return false;
+          }
+        })();
+
+        if (isPendingCustomerRedirect) {
+          try {
+            sessionStorage.removeItem('tb_customer_google_pending');
+            sessionStorage.removeItem('tb_explicit_logout');
+          } catch {
+            // ignore
+          }
+          try {
+            const snap = await getDoc(doc(db, 'customers', res.user.uid));
+            const data = snap.exists() ? (snap.data() as Partial<UserProfile>) : null;
+            if (!data?.name || !data?.phone) {
+              setCustomerAuthError('');
+              setCustomerAuthInitialStep('complete_profile');
+              setIsCustomerAuthModalOpen(true);
+            }
+          } catch {
+            setCustomerAuthInitialStep('complete_profile');
+            setIsCustomerAuthModalOpen(true);
+          }
+          return;
+        }
 
         if (email === ADMIN_EMAIL.toLowerCase() && res.user.emailVerified === true) {
           try {
@@ -624,6 +656,11 @@ export default function App() {
           if (sessionStorage.getItem('tb_admin_login_pending') === 'true') {
             sessionStorage.removeItem('tb_admin_login_pending');
             setAdminAuthError(`Google Auth verification failed: ${err?.message || 'Unauthorized'}`);
+          } else if (sessionStorage.getItem('tb_customer_google_pending') === 'true') {
+            sessionStorage.removeItem('tb_customer_google_pending');
+            setCustomerAuthError(`Google sign-in failed: ${err?.message || 'Unauthorized'}`);
+            setCustomerAuthInitialStep('login');
+            setIsCustomerAuthModalOpen(true);
           }
         } catch {
           // ignore
@@ -661,7 +698,7 @@ export default function App() {
           }
         }
 
-        let remoteProfile: Partial<UserProfile> = {};
+        let remoteProfile: Partial<UserProfile> | null = null;
         try {
           const snap = await getDoc(doc(db, 'customers', fbUser.uid));
           if (snap.exists()) {
@@ -671,12 +708,33 @@ export default function App() {
           console.warn('Customer profile fetch notice:', (err as Error)?.message);
         }
         setUser((prev) => {
-          const rawPhone = remoteProfile.phone || prev.phone;
+          const isSameUid = Boolean(prev.id && prev.id === fbUser.uid);
+          const cleanBase: UserProfile = remoteProfile
+            ? { ...(isSameUid ? prev : INITIAL_USER), ...remoteProfile }
+            : isSameUid
+              ? prev
+              : {
+                  ...INITIAL_USER,
+                  id: fbUser.uid,
+                  userId: fbUser.uid,
+                  name: fbUser.displayName || (fbUser.isAnonymous ? 'Guest Shopper' : 'Customer'),
+                  phone: fbUser.phoneNumber || '',
+                  email: fbUser.email || '',
+                  address: '',
+                  location: currentLocation,
+                  pincode: currentPincode,
+                  language: prev.language || 'en',
+                  wishlist: [],
+                  emergencyContact: undefined,
+                  gpsCoordinates: undefined
+                };
+          const rawPhone = remoteProfile?.phone || cleanBase.phone || fbUser.phoneNumber || '';
           const effectivePhone = normalizePhoneE164(rawPhone) || rawPhone;
           const flags = getAuthFlags(fbUser, effectivePhone);
           const updated: UserProfile = {
-            ...prev,
-            ...remoteProfile,
+            ...cleanBase,
+            name: remoteProfile?.name || cleanBase.name || fbUser.displayName || 'Customer',
+            email: remoteProfile?.email || cleanBase.email || fbUser.email || '',
             phone: effectivePhone,
             id: fbUser.uid,
             userId: fbUser.uid,
@@ -2611,15 +2669,36 @@ export default function App() {
   };
 
   const handleRegisterCustomer = async (newUser: UserProfile) => {
-    const authUid = await resolveAuthUid();
+    const fbUser = auth.currentUser;
+    const authUid = fbUser?.uid;
+    if (!fbUser || !authUid) {
+      throw new Error('Firebase authentication session is required to save customer profile.');
+    }
+
+    const {
+      password: _pw,
+      otp: _otp,
+      role: _role,
+      partnerRole: _prole,
+      approved: _app,
+      status: _st,
+      isAdmin: _ia,
+      admin: _adm,
+      ...safeProfileFields
+    } = newUser as UserProfile & Record<string, unknown>;
+
     const normalizedPhone = normalizePhoneE164(newUser.phone) || newUser.phone.trim();
-    const flags = getAuthFlags(auth.currentUser, normalizedPhone);
+    const flags = getAuthFlags(fbUser, normalizedPhone);
     const finalUser: UserProfile = {
-      ...newUser,
+      ...safeProfileFields,
+      id: authUid,
+      userId: authUid,
       phone: normalizedPhone,
-      ...(authUid ? { id: authUid, userId: authUid } : {}),
       ...flags
     };
+
+    await safeSetDoc(doc(db, 'customers', authUid), finalUser, { merge: true });
+
     setUser(finalUser);
     if (finalUser.location) setCurrentLocation(finalUser.location);
     if (finalUser.pincode) setCurrentPincode(finalUser.pincode);
@@ -2627,9 +2706,6 @@ export default function App() {
       localStorage.setItem('tb_user', JSON.stringify(finalUser));
     } catch (e) {
       console.warn(e);
-    }
-    if (authUid) {
-      safeSetDoc(doc(db, 'customers', authUid), finalUser, { merge: true }).catch((err) => console.warn(err));
     }
   };
 
@@ -3270,7 +3346,10 @@ export default function App() {
                     try { localStorage.setItem('tb_language', lang); } catch (e) { console.warn(e); }
                   }}
                   localities={localities}
-                  onOpenAuthModal={() => setIsCustomerAuthModalOpen(true)}
+                  onOpenAuthModal={() => {
+                    setCustomerAuthInitialStep('login');
+                    setIsCustomerAuthModalOpen(true);
+                  }}
                   onFileComplaint={handleCustomerFileComplaint}
                   complaints={complaints}
                   products={visibleCustomerProducts}
@@ -3281,7 +3360,23 @@ export default function App() {
                   onLogout={async () => {
                     await handleAuthSignOut();
                     try { localStorage.removeItem('tb_user'); } catch (e) { console.warn(e); }
-                    setUser(INITIAL_USER);
+                    setUser({
+                      ...INITIAL_USER,
+                      id: '',
+                      userId: '',
+                      name: 'Guest Customer',
+                      phone: '',
+                      email: '',
+                      address: '',
+                      location: currentLocation,
+                      pincode: currentPincode,
+                      language: user.language || 'en',
+                      isSessionAuthenticated: false,
+                      isPhoneVerified: false,
+                      isVerified: false,
+                      authMethod: 'none'
+                    });
+                    setCustomerAuthInitialStep('login');
                     setIsCustomerAuthModalOpen(true);
                   }}
                 />
@@ -3371,6 +3466,7 @@ export default function App() {
           }}
           onOpenAuthModal={() => {
             setIsSideDrawerOpen(false);
+            setCustomerAuthInitialStep('login');
             setIsCustomerAuthModalOpen(true);
           }}
           onOpenCart={() => {
@@ -3382,7 +3478,23 @@ export default function App() {
             setIsSideDrawerOpen(false);
             await handleAuthSignOut();
             try { localStorage.removeItem('tb_user'); } catch (e) { console.warn(e); }
-            setUser(INITIAL_USER);
+            setUser({
+              ...INITIAL_USER,
+              id: '',
+              userId: '',
+              name: 'Guest Customer',
+              phone: '',
+              email: '',
+              address: '',
+              location: currentLocation,
+              pincode: currentPincode,
+              language: user.language || 'en',
+              isSessionAuthenticated: false,
+              isPhoneVerified: false,
+              isVerified: false,
+              authMethod: 'none'
+            });
+            setCustomerAuthInitialStep('login');
             setIsCustomerAuthModalOpen(true);
           }}
         />
@@ -3447,16 +3559,25 @@ export default function App() {
 
         <CustomerAuthModal
           isOpen={isCustomerAuthModalOpen}
-          onClose={() => setIsCustomerAuthModalOpen(false)}
+          onClose={() => {
+            setCustomerAuthError('');
+            setCustomerAuthInitialStep('login');
+            setIsCustomerAuthModalOpen(false);
+          }}
           currentUser={user}
           onLoginSuccess={(u) => {
             setUser(u);
             if (u.location) setCurrentLocation(u.location);
             if (u.pincode) setCurrentPincode(u.pincode);
+            setCustomerAuthError('');
+            setCustomerAuthInitialStep('login');
             setIsCustomerAuthModalOpen(false);
           }}
           onRegisterCustomer={handleRegisterCustomer}
           localities={localities}
+          externalError={customerAuthError}
+          onClearExternalError={() => setCustomerAuthError('')}
+          initialStep={customerAuthInitialStep}
         />
 
         <DriverAuthModal
