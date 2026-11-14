@@ -1,0 +1,1247 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // GLOBAL SECURITY HELPERS
+    // =========================================================================
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Safe token claim existence helpers (prevents CEL undefined-property
+    // errors for Firebase Anonymous Auth, email-only, or phone-only tokens).
+    function hasTokenKey(key) {
+      return isSignedIn() && request.auth.token != null && (key in request.auth.token);
+    }
+
+    function hasPhoneToken() {
+      return hasTokenKey('phone_number') &&
+        request.auth.token.phone_number is string &&
+        request.auth.token.phone_number.size() > 0;
+    }
+
+    // Exact Firebase Auth token phone_number comparison against document phone
+    function hasMatchingVerifiedPhone(phoneVal) {
+      return hasPhoneToken() &&
+        phoneVal is string &&
+        phoneVal == request.auth.token.phone_number;
+    }
+
+    function hasVerifiedEmailToken() {
+      return hasTokenKey('email') &&
+        hasTokenKey('email_verified') &&
+        request.auth.token.email is string &&
+        request.auth.token.email_verified == true;
+    }
+
+    // Verified Super Admin: requires cryptographic Firebase Auth token with
+    // verified email matching the authorized platform owner.
+    function isAdmin() {
+      return isSignedIn() &&
+        hasVerifiedEmailToken() &&
+        request.auth.token.email == 'taibaralir@gmail.com';
+    }
+
+    // Relational shop approval check (server-side doc check via get/exists)
+    function isShopApproved(shopId) {
+      return shopId is string &&
+        isValidId(shopId) &&
+        exists(/databases/$(database)/documents/shops/$(shopId)) &&
+        get(/databases/$(database)/documents/shops/$(shopId)).data.status == 'approved';
+    }
+
+    // Relational shop ownership check (must be an approved shop owned by caller)
+    function isApprovedShopOwner(shopId) {
+      return isSignedIn() &&
+        isShopApproved(shopId) &&
+        get(/databases/$(database)/documents/shops/$(shopId)).data.ownerId == request.auth.uid;
+    }
+
+    // Relational doctor ownership check (must be an approved doctor owned by caller)
+    function isApprovedDoctorOwner(doctorDocId) {
+      return isSignedIn() &&
+        doctorDocId is string &&
+        isValidId(doctorDocId) &&
+        exists(/databases/$(database)/documents/doctors/$(doctorDocId)) &&
+        get(/databases/$(database)/documents/doctors/$(doctorDocId)).data.ownerId == request.auth.uid &&
+        get(/databases/$(database)/documents/doctors/$(doctorDocId)).data.status == 'approved';
+    }
+
+    // Relational driver ownership check
+    function isApprovedDriverOwner(driverDocId) {
+      return isSignedIn() &&
+        driverDocId is string &&
+        isValidId(driverDocId) &&
+        exists(/databases/$(database)/documents/drivers/$(driverDocId)) &&
+        get(/databases/$(database)/documents/drivers/$(driverDocId)).data.ownerId == request.auth.uid &&
+        get(/databases/$(database)/documents/drivers/$(driverDocId)).data.status == 'approved';
+    }
+
+    // Relational delivery rider approval & ownership checks
+    function isApprovedRiderRecord(personDocId) {
+      return personDocId is string &&
+        isValidId(personDocId) &&
+        exists(/databases/$(database)/documents/deliveryPersons/$(personDocId)) &&
+        get(/databases/$(database)/documents/deliveryPersons/$(personDocId)).data.status == 'approved';
+    }
+
+    function isApprovedDeliveryOwner(personDocId) {
+      return isSignedIn() &&
+        isApprovedRiderRecord(personDocId) &&
+        get(/databases/$(database)/documents/deliveryPersons/$(personDocId)).data.ownerId == request.auth.uid;
+    }
+
+    // Relational service provider ownership check (providerId stores /serviceProviders/{providerId} doc ID)
+    function isApprovedServiceProviderOwner(providerDocId) {
+      return isSignedIn() &&
+        providerDocId is string &&
+        isValidId(providerDocId) &&
+        exists(/databases/$(database)/documents/serviceProviders/$(providerDocId)) &&
+        get(/databases/$(database)/documents/serviceProviders/$(providerDocId)).data.ownerId == request.auth.uid &&
+        get(/databases/$(database)/documents/serviceProviders/$(providerDocId)).data.status == 'approved';
+    }
+
+    // Relational job ownership check
+    function isJobOwner(jobId) {
+      return isSignedIn() &&
+        jobId is string &&
+        isValidId(jobId) &&
+        exists(/databases/$(database)/documents/jobs/$(jobId)) &&
+        get(/databases/$(database)/documents/jobs/$(jobId)).data.employerId == request.auth.uid;
+    }
+
+    // =========================================================================
+    // ENTITY & STRICT ALLOWLIST VALIDATION HELPERS
+    // =========================================================================
+    function isValidCustomerData(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 120 &&
+        data.phone is string && data.phone.size() > 0 && data.phone.size() <= 30 &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 150)) &&
+        (!('location' in data) || (data.location is string && data.location.size() <= 120)) &&
+        (!('pincode' in data) || (data.pincode is string && data.pincode.size() <= 16)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 500)) &&
+        (!('state' in data) || (data.state is string && data.state.size() <= 80)) &&
+        (!('district' in data) || (data.district is string && data.district.size() <= 80)) &&
+        (!('block' in data) || (data.block is string && data.block.size() <= 80)) &&
+        !('role' in data) &&
+        !('partnerRole' in data) &&
+        !('approved' in data) &&
+        !('status' in data) &&
+        !('isAdmin' in data) &&
+        !('admin' in data) &&
+        !('password' in data) &&
+        (!('isPhoneVerified' in data) || data.isPhoneVerified == hasMatchingVerifiedPhone(data.phone)) &&
+        (!('isVerified' in data) || data.isVerified == (hasMatchingVerifiedPhone(data.phone) || hasVerifiedEmailToken())) &&
+        (!('authMethod' in data) || (
+          data.authMethod in ['anonymous', 'google', 'email', 'phone', 'none'] &&
+          (data.authMethod != 'phone' || hasMatchingVerifiedPhone(data.phone))
+        ));
+    }
+
+    function isValidShopData(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 150 &&
+        data.locality is string && data.locality.size() > 0 && data.locality.size() <= 100 &&
+        data.contactNumber is string && data.contactNumber.size() > 0 && data.contactNumber.size() <= 30 &&
+        data.status in ['pending', 'approved', 'rejected', 'suspended'] &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 500)) &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1500));
+    }
+
+    // Strict allowlist for publicShops (no ownerId, ownerEmail, private phone, license, revenue)
+    function isValidPublicShopCard(data) {
+      return data.keys().hasAll(['id', 'name', 'locality', 'category', 'status']) &&
+        data.keys().hasOnly([
+          'id', 'name', 'locality', 'pincode', 'imageUrl', 'description',
+          'category', 'shopType', 'status', 'isVerified', 'isOpen',
+          'deliveryAreas', 'deliveryCharge', 'freeDeliveryAbove',
+          'deliveryRadiusKm', 'rating', 'businessHours',
+          'publishContact', 'publicContactNumber', 'updatedAt'
+        ]) &&
+        data.id is string && isValidId(data.id) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 150 &&
+        data.locality is string && data.locality.size() > 0 && data.locality.size() <= 100 &&
+        data.category is string && data.category.size() > 0 && data.category.size() <= 100 &&
+        data.status in ['pending', 'approved', 'rejected', 'suspended'] &&
+        (!('pincode' in data) || (data.pincode is string && data.pincode.size() <= 16)) &&
+        (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 1000)) &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1500)) &&
+        (!('businessHours' in data) || (data.businessHours is string && data.businessHours.size() <= 120)) &&
+        (
+          !('publicContactNumber' in data) ||
+          (('publishContact' in data) && data.publishContact == true && data.publicContactNumber is string && data.publicContactNumber.size() > 0 && data.publicContactNumber.size() <= 30)
+        );
+    }
+
+    // Strict allowlist for publicDoctors (no ownerId, phone, email, clinicAddress, regNo, documentUrl)
+    function isValidPublicDoctorCard(data) {
+      return data.keys().hasAll(['id', 'name', 'qualification', 'specialization', 'consultationFee', 'status']) &&
+        data.keys().hasOnly([
+          'id', 'name', 'qualification', 'specialization', 'experienceYears',
+          'consultationFee', 'homeVisitFee', 'localitiesServed', 'servedLocalities',
+          'parentArea', 'availableSchedule', 'isOnline', 'isAvailable',
+          'status', 'rating', 'completedConsultations', 'totalConsultations', 'updatedAt'
+        ]) &&
+        data.id is string && isValidId(data.id) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 120 &&
+        data.qualification is string && data.qualification.size() > 0 && data.qualification.size() <= 120 &&
+        data.specialization is string && data.specialization.size() > 0 && data.specialization.size() <= 120 &&
+        data.consultationFee is number && data.consultationFee >= 0 &&
+        data.status in ['pending', 'approved', 'rejected', 'suspended'];
+    }
+
+    // Strict allowlist for publicServiceProviders (no ownerId, phone, email, licenseNumber, documentUrl)
+    function isValidPublicServiceProviderCard(data) {
+      return data.keys().hasAll(['id', 'name', 'category', 'serviceArea', 'hourlyRate', 'status']) &&
+        data.keys().hasOnly([
+          'id', 'name', 'category', 'serviceArea', 'description',
+          'experienceYears', 'hourlyRate', 'status', 'isAvailable',
+          'rating', 'totalJobsCompleted', 'updatedAt'
+        ]) &&
+        data.id is string && isValidId(data.id) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 120 &&
+        data.category is string && data.category.size() > 0 && data.category.size() <= 100 &&
+        data.serviceArea is string && data.serviceArea.size() > 0 && data.serviceArea.size() <= 120 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1500)) &&
+        data.hourlyRate is number && data.hourlyRate >= 0 &&
+        data.status in ['pending', 'approved', 'rejected', 'suspended'];
+    }
+
+    // Strict allowlist for publicJobs (no employerId, employerName, private employerPhone; explicit publicContact policy)
+    function isValidPublicJobCard(data) {
+      return data.keys().hasAll(['id', 'title', 'company', 'category', 'location', 'salary', 'jobType', 'status']) &&
+        data.keys().hasOnly([
+          'id', 'title', 'company', 'category', 'location', 'salary',
+          'jobType', 'description', 'vacancies', 'applicantsCount', 'status',
+          'posted', 'publishContact', 'publicContactNumber', 'updatedAt'
+        ]) &&
+        data.id is string && isValidId(data.id) &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 160 &&
+        data.company is string && data.company.size() > 0 && data.company.size() <= 150 &&
+        data.category is string && data.category.size() > 0 && data.category.size() <= 80 &&
+        data.location is string && data.location.size() > 0 && data.location.size() <= 150 &&
+        data.salary is string && data.salary.size() > 0 && data.salary.size() <= 80 &&
+        data.jobType in ['Full-time', 'Part-time', 'Urgent', 'Flexible'] &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 2000)) &&
+        data.status in ['pending', 'approved', 'rejected'] &&
+        (
+          !('publicContactNumber' in data) ||
+          (('publishContact' in data) && data.publishContact == true && data.publicContactNumber is string && data.publicContactNumber.size() > 0 && data.publicContactNumber.size() <= 30)
+        );
+    }
+
+    // Strict allowlist for publicRiders (no ownerId, phone, email)
+    function isValidPublicRiderCard(data) {
+      return data.keys().hasAll(['id', 'name', 'locality', 'status']) &&
+        data.keys().hasOnly(['id', 'name', 'locality', 'status', 'isOnline', 'rating', 'updatedAt']) &&
+        data.id is string && isValidId(data.id) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 120 &&
+        data.locality is string && data.locality.size() > 0 && data.locality.size() <= 120 &&
+        data.status in ['pending', 'approved', 'rejected', 'suspended'];
+    }
+
+    function isValidProductData(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 160 &&
+        data.category is string && data.category.size() > 0 && data.category.size() <= 80 &&
+        data.shopId is string && isValidId(data.shopId) &&
+        data.shopStatus in ['pending', 'approved', 'rejected', 'suspended'] &&
+        data.price is number && data.price >= 0 &&
+        data.unit is string && data.unit.size() > 0 && data.unit.size() <= 40 &&
+        data.inStock is bool &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 2000));
+    }
+
+    // Strict allowlist for publicProducts (forbids ownerId)
+    function isValidPublicProductCard(data) {
+      return data.keys().hasAll(['id', 'name', 'category', 'shopId', 'shopStatus', 'price', 'unit', 'inStock']) &&
+        data.keys().hasOnly([
+          'id', 'shopId', 'shopName', 'shopStatus', 'name', 'localName',
+          'price', 'originalPrice', 'unit', 'image', 'category', 'categoryType',
+          'rating', 'inStock', 'stock', 'isAvailable', 'isDeal', 'badge',
+          'description', 'brand', 'isBrandNew', 'specs', 'warranty',
+          'sellerName', 'sellerLocality', 'requiresPrescription', 'expiryDate',
+          'dosageForm', 'manufacturer', 'isWeightBased', 'pricePerKg',
+          'availableWeights', 'dailyFresh', 'createdAt', 'updatedAt'
+        ]) &&
+        !('ownerId' in data) &&
+        data.id is string && isValidId(data.id) &&
+        isValidProductData(data);
+    }
+
+    function isValidOrderData(data) {
+      return data.customerId is string && data.customerId.size() > 0 && data.customerId.size() <= 128 &&
+        data.shopId is string && isValidId(data.shopId) &&
+        (!('shopOwnerId' in data) || (data.shopOwnerId is string && data.shopOwnerId.size() <= 128)) &&
+        data.customerName is string && data.customerName.size() > 0 && data.customerName.size() <= 120 &&
+        data.customerPhone is string && data.customerPhone.size() > 0 && data.customerPhone.size() <= 30 &&
+        data.deliveryAddress is string && data.deliveryAddress.size() > 0 && data.deliveryAddress.size() <= 500 &&
+        data.subtotal is number && data.subtotal >= 0 &&
+        data.deliveryFee is number && data.deliveryFee >= 0 &&
+        data.discount is number && data.discount >= 0 &&
+        data.total is number && data.total >= 0 &&
+        (
+          data.total == data.subtotal + data.deliveryFee - data.discount ||
+          (data.subtotal + data.deliveryFee - data.discount < 0 && data.total == 0)
+        ) &&
+        data.paymentMethod is string && data.paymentMethod.size() > 0 && data.paymentMethod.size() <= 60 &&
+        data.status in [
+          'pending', 'placed', 'confirmed', 'preparing', 'ready_for_dispatch',
+          'packed', 'out_for_delivery', 'delivered', 'cancelled', 'rejected'
+        ] &&
+        data.items is list && data.items.size() > 0 && data.items.size() <= 100;
+    }
+
+    function isValidServiceRequestData(data) {
+      return data.customerId is string && data.customerId.size() > 0 && data.customerId.size() <= 128 &&
+        data.customerName is string && data.customerName.size() > 0 && data.customerName.size() <= 120 &&
+        data.customerPhone is string && data.customerPhone.size() > 0 && data.customerPhone.size() <= 30 &&
+        data.category is string && data.category.size() > 0 && data.category.size() <= 80 &&
+        data.address is string && data.address.size() > 0 && data.address.size() <= 500 &&
+        data.preferredDate is string && data.preferredDate.size() > 0 && data.preferredDate.size() <= 60 &&
+        data.preferredTime is string && data.preferredTime.size() > 0 && data.preferredTime.size() <= 80 &&
+        data.issueDescription is string && data.issueDescription.size() > 0 && data.issueDescription.size() <= 1000 &&
+        data.estimatedFee is number && data.estimatedFee >= 0 &&
+        (!('finalFee' in data) || (data.finalFee is number && data.finalFee >= 0)) &&
+        (!('providerId' in data) || isValidId(data.providerId)) &&
+        (!('providerOwnerId' in data) || (data.providerOwnerId is string && data.providerOwnerId.size() <= 128)) &&
+        data.status in ['requested', 'accepted', 'in_progress', 'completed', 'cancelled'];
+    }
+
+    function isValidJobData(data) {
+      return data.employerId is string && data.employerId.size() > 0 && data.employerId.size() <= 128 &&
+        data.employerName is string && data.employerName.size() > 0 && data.employerName.size() <= 120 &&
+        data.employerPhone is string && data.employerPhone.size() > 0 && data.employerPhone.size() <= 30 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 160 &&
+        data.category is string && data.category.size() > 0 && data.category.size() <= 80 &&
+        data.location is string && data.location.size() > 0 && data.location.size() <= 150 &&
+        data.salary is string && data.salary.size() > 0 && data.salary.size() <= 80 &&
+        data.jobType in ['Full-time', 'Part-time', 'Urgent', 'Flexible'] &&
+        data.description is string && data.description.size() > 0 && data.description.size() <= 2000 &&
+        data.status in ['pending', 'approved', 'rejected'];
+    }
+
+    function isValidJobApplicationData(data) {
+      return data.jobId is string && isValidId(data.jobId) &&
+        data.applicantId is string && data.applicantId.size() > 0 && data.applicantId.size() <= 128 &&
+        data.jobTitle is string && data.jobTitle.size() > 0 && data.jobTitle.size() <= 160 &&
+        data.applicantName is string && data.applicantName.size() > 0 && data.applicantName.size() <= 120 &&
+        data.applicantPhone is string && data.applicantPhone.size() > 0 && data.applicantPhone.size() <= 30 &&
+        (!('applicantNotes' in data) || (data.applicantNotes is string && data.applicantNotes.size() <= 1000)) &&
+        (!('companyName' in data) || (data.companyName is string && data.companyName.size() <= 150)) &&
+        (!('employerId' in data) || (data.employerId is string && data.employerId.size() <= 128)) &&
+        data.status in ['pending', 'shortlisted', 'hired', 'rejected'];
+    }
+
+    function isValidScrapRequestData(data) {
+      return data.customerId is string && data.customerId.size() > 0 && data.customerId.size() <= 128 &&
+        data.customerName is string && data.customerName.size() > 0 && data.customerName.size() <= 120 &&
+        data.customerPhone is string && data.customerPhone.size() > 0 && data.customerPhone.size() <= 30 &&
+        data.category is string && data.category.size() > 0 && data.category.size() <= 40 &&
+        data.categoryLabel is string && data.categoryLabel.size() > 0 && data.categoryLabel.size() <= 120 &&
+        data.estimatedWeight is string && data.estimatedWeight.size() > 0 && data.estimatedWeight.size() <= 60 &&
+        data.pickupAddress is string && data.pickupAddress.size() > 0 && data.pickupAddress.size() <= 500 &&
+        data.locality is string && data.locality.size() > 0 && data.locality.size() <= 100 &&
+        data.pincode is string && data.pincode.size() > 0 && data.pincode.size() <= 16 &&
+        data.offers is list && data.offers.size() <= 50 &&
+        data.status in ['open', 'offers_received', 'accepted', 'pickup_scheduled', 'picked_up', 'completed', 'cancelled'];
+    }
+
+    function isValidComplaintData(data) {
+      return data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+        data.description is string && data.description.size() > 0 && data.description.size() <= 2000 &&
+        data.status in ['open', 'investigating', 'resolved'] &&
+        (!('subject' in data) || (data.subject is string && data.subject.size() <= 200));
+    }
+
+    function isValidEmergencyRequestData(data) {
+      return data.patientUserId is string && data.patientUserId.size() > 0 && data.patientUserId.size() <= 128 &&
+        data.patientName is string && data.patientName.size() > 0 && data.patientName.size() <= 120 &&
+        data.patientPhone is string && data.patientPhone.size() > 0 && data.patientPhone.size() <= 30 &&
+        data.patientAge is number && data.patientAge >= 0 && data.patientAge <= 130 &&
+        data.symptoms is string && data.symptoms.size() > 0 && data.symptoms.size() <= 2000 &&
+        data.locality is string && data.locality.size() > 0 && data.locality.size() <= 100 &&
+        data.status in ['searching', 'pending', 'accepted', 'doctor_on_the_way', 'on_the_way', 'completed', 'cancelled'];
+    }
+
+    // Strict non-PII allowlists for dispatch collections (ban customerName, phone, address, symptoms, patientId, private doc refs)
+    function isValidRideDispatchData(data) {
+      return data.keys().hasAll(['id', 'vehicleType', 'pickupLocality', 'dropLocality', 'estimatedFare', 'status']) &&
+        data.keys().hasOnly([
+          'id', 'vehicleType', 'pickupLocality', 'dropLocality', 'distanceKm',
+          'estimatedFare', 'customerProposedFare', 'status', 'assignedDriverId',
+          'createdAt', 'updatedAt'
+        ]);
+    }
+
+    function isValidDeliveryDispatchData(data) {
+      return data.keys().hasAll(['id', 'pickupLocality', 'dropLocality', 'estimatedPrice', 'status']) &&
+        data.keys().hasOnly([
+          'id', 'pickupLocality', 'dropLocality', 'parcelCategory', 'weightCategory',
+          'estimatedPrice', 'status', 'assignedDeliveryPersonId', 'createdAt', 'updatedAt'
+        ]);
+    }
+
+    function isValidEmergencyDispatchData(data) {
+      return data.keys().hasAll(['id', 'locality', 'pincode', 'priority', 'requestType', 'status']) &&
+        data.keys().hasOnly([
+          'id', 'locality', 'pincode', 'priority', 'requestType',
+          'consultationFee', 'crossLocalityApproved', 'status', 'assignedDoctorId',
+          'createdAt', 'updatedAt'
+        ]);
+    }
+
+    // =========================================================================
+    // DEFAULT DENY CATCH-ALL (GLOBAL SAFETY NET)
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // CUSTOMERS (STRICT PRIVATE PII ISOLATION & EXACT PHONE VERIFICATION)
+    // =========================================================================
+    match /customers/{customerId} {
+      allow get: if isValidId(customerId) && (isOwner(customerId) || isAdmin());
+      allow list: if isAdmin() || (
+        isSignedIn() && (
+          ('id' in existing() && existing().id == request.auth.uid) ||
+          ('userId' in existing() && existing().userId == request.auth.uid)
+        )
+      );
+      allow create: if isValidId(customerId) &&
+        isValidCustomerData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            isOwner(customerId) &&
+            (!('id' in incoming()) || incoming().id == request.auth.uid) &&
+            (!('userId' in incoming()) || incoming().userId == request.auth.uid)
+          )
+        );
+      allow update: if isValidId(customerId) &&
+        isValidCustomerData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            isOwner(customerId) &&
+            (!('id' in incoming()) || incoming().id == request.auth.uid) &&
+            (!('userId' in incoming()) || incoming().userId == request.auth.uid) &&
+            (!('id' in existing()) || incoming().id == existing().id) &&
+            (!('userId' in existing()) || incoming().userId == existing().userId)
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // PRIVATE PARTNER DIRECTORY: SHOPS (OWNER & ADMIN ONLY) & PUBLIC CARDS
+    // =========================================================================
+    match /shops/{shopId} {
+      allow get: if isValidId(shopId) && (isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
+      allow create: if isValidId(shopId) &&
+        isSignedIn() &&
+        isValidShopData(incoming()) &&
+        (
+          isAdmin() ||
+          (incoming().ownerId == request.auth.uid && incoming().status == 'pending' && (!('isVerified' in incoming()) || incoming().isVerified == false))
+        );
+      allow update: if isValidId(shopId) &&
+        isSignedIn() &&
+        isValidShopData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            incoming().ownerId == existing().ownerId &&
+            incoming().status == existing().status &&
+            !incoming().diff(existing()).affectedKeys().hasAny(['status', 'isVerified', 'ownerId'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /publicShops/{shopId} {
+      allow get: if isValidId(shopId) && (existing().status == 'approved' || isAdmin());
+      allow list: if existing().status == 'approved' || isAdmin();
+      allow create, update: if isValidId(shopId) && isAdmin() && isValidPublicShopCard(incoming());
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // PRIVATE PRODUCTS (OWNER & ADMIN ONLY; CONTAINS ownerId) & PUBLIC CARDS (NO ownerId)
+    // =========================================================================
+    match /products/{productId} {
+      allow get: if isValidId(productId) && (
+        isAdmin() ||
+        (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid)
+      );
+      allow list: if isAdmin() ||
+        (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
+      allow create: if isValidId(productId) &&
+        isSignedIn() &&
+        isValidProductData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            incoming().ownerId == request.auth.uid &&
+            isApprovedShopOwner(incoming().shopId) &&
+            incoming().shopStatus == 'approved'
+          )
+        );
+      allow update: if isValidId(productId) &&
+        isSignedIn() &&
+        isValidProductData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            incoming().ownerId == existing().ownerId &&
+            incoming().shopId == existing().shopId &&
+            incoming().shopStatus == existing().shopStatus &&
+            !incoming().diff(existing()).affectedKeys().hasAny(['shopStatus', 'ownerId', 'shopId', 'id']) &&
+            isApprovedShopOwner(existing().shopId)
+          )
+        );
+      allow delete: if isValidId(productId) &&
+        isSignedIn() &&
+        (isAdmin() || (existing().ownerId == request.auth.uid && isApprovedShopOwner(existing().shopId)));
+    }
+
+    // PUBLIC NON-PII PRODUCT CARDS (NO ownerId; requires BOTH shopStatus == 'approved' AND parent shop status == 'approved')
+    match /publicProducts/{productId} {
+      allow get: if isValidId(productId) && (
+        isAdmin() ||
+        (existing().shopStatus == 'approved' && isShopApproved(existing().shopId))
+      );
+      allow list: if isAdmin() ||
+        (existing().shopStatus == 'approved' && isShopApproved(existing().shopId));
+      allow create: if isValidId(productId) &&
+        isSignedIn() &&
+        isValidPublicProductCard(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            isApprovedShopOwner(incoming().shopId) &&
+            incoming().shopStatus == 'approved' &&
+            existsAfter(/databases/$(database)/documents/products/$(productId)) &&
+            getAfter(/databases/$(database)/documents/products/$(productId)).data.ownerId == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/products/$(productId)).data.shopId == incoming().shopId &&
+            getAfter(/databases/$(database)/documents/products/$(productId)).data.shopStatus == 'approved'
+          )
+        );
+      allow update: if isValidId(productId) &&
+        isSignedIn() &&
+        isValidPublicProductCard(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            existing().shopId == incoming().shopId &&
+            incoming().shopStatus == existing().shopStatus &&
+            !incoming().diff(existing()).affectedKeys().hasAny(['shopStatus', 'shopId', 'id']) &&
+            isApprovedShopOwner(existing().shopId) &&
+            existsAfter(/databases/$(database)/documents/products/$(productId)) &&
+            getAfter(/databases/$(database)/documents/products/$(productId)).data.ownerId == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/products/$(productId)).data.shopId == existing().shopId
+          )
+        );
+      allow delete: if isValidId(productId) &&
+        isSignedIn() &&
+        (isAdmin() || isApprovedShopOwner(existing().shopId));
+    }
+
+    // =========================================================================
+    // ORDERS (APPROVED RIDER ASSIGNMENT CHECK, IMMUTABLE PRICING;
+    // NOTE: Catalog unit-price verification & stock deduction require BACKEND REQUIRED)
+    // =========================================================================
+    match /orders/{orderId} {
+      allow get: if isValidId(orderId) &&
+        isSignedIn() &&
+        (
+          isAdmin() ||
+          ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+          ('riderId' in existing() && (existing().riderId == request.auth.uid || isApprovedDeliveryOwner(existing().riderId))) ||
+          ('shopId' in existing() && isApprovedShopOwner(existing().shopId))
+        );
+      allow list: if isAdmin() ||
+        (
+          isSignedIn() &&
+          (
+            ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+            ('riderId' in existing() && (existing().riderId == request.auth.uid || isApprovedDeliveryOwner(existing().riderId))) ||
+            ('shopId' in existing() && isApprovedShopOwner(existing().shopId))
+          )
+        );
+      allow create: if isValidId(orderId) &&
+        isSignedIn() &&
+        isValidOrderData(incoming()) &&
+        incoming().customerId == request.auth.uid &&
+        incoming().status == 'pending' &&
+        !('riderId' in incoming()) &&
+        !('riderPhone' in incoming()) &&
+        (!('confirmedByShopkeeper' in incoming()) || incoming().confirmedByShopkeeper == false) &&
+        isShopApproved(incoming().shopId) &&
+        (!('shopOwnerId' in incoming()) || incoming().shopOwnerId == '' || incoming().shopOwnerId == get(/databases/$(database)/documents/shops/$(incoming().shopId)).data.ownerId);
+      allow update: if isValidId(orderId) &&
+        isSignedIn() &&
+        isValidOrderData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            incoming().customerId == existing().customerId &&
+            incoming().shopId == existing().shopId &&
+            (!('shopOwnerId' in existing()) || (('shopOwnerId' in incoming()) && incoming().shopOwnerId == existing().shopOwnerId)) &&
+            incoming().items == existing().items &&
+            incoming().subtotal == existing().subtotal &&
+            incoming().deliveryFee == existing().deliveryFee &&
+            incoming().discount == existing().discount &&
+            incoming().total == existing().total &&
+            (
+              (
+                existing().customerId == request.auth.uid &&
+                existing().status in ['pending', 'placed', 'confirmed'] &&
+                incoming().status == 'cancelled' &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              ) ||
+              (
+                isApprovedShopOwner(existing().shopId) &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'rejectionReason', 'riderId', 'riderName', 'confirmedByShopkeeper', 'updatedAt'
+                ]) &&
+                (
+                  !incoming().diff(existing()).affectedKeys().hasAny(['riderId', 'riderName']) ||
+                  (
+                    incoming().riderId is string &&
+                    isApprovedRiderRecord(incoming().riderId) &&
+                    incoming().riderName == get(/databases/$(database)/documents/deliveryPersons/$(incoming().riderId)).data.name
+                  )
+                ) &&
+                (
+                  (existing().status in ['pending', 'placed'] && incoming().status in ['confirmed', 'rejected']) ||
+                  (existing().status == 'confirmed' && incoming().status in ['confirmed', 'preparing', 'packed', 'ready_for_dispatch']) ||
+                  (existing().status == 'preparing' && incoming().status in ['preparing', 'packed', 'ready_for_dispatch']) ||
+                  (
+                    existing().status in ['packed', 'ready_for_dispatch'] &&
+                    incoming().status in ['packed', 'ready_for_dispatch', 'out_for_delivery'] &&
+                    (
+                      incoming().status != 'out_for_delivery' ||
+                      (
+                        ('riderId' in incoming()) &&
+                        isApprovedRiderRecord(incoming().riderId) &&
+                        incoming().riderName == get(/databases/$(database)/documents/deliveryPersons/$(incoming().riderId)).data.name
+                      )
+                    )
+                  )
+                )
+              ) ||
+              (
+                ('riderId' in existing()) &&
+                (existing().riderId == request.auth.uid || isApprovedDeliveryOwner(existing().riderId)) &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+                (
+                  (existing().status in ['confirmed', 'packed', 'ready_for_dispatch'] && incoming().status == 'out_for_delivery') ||
+                  (existing().status == 'out_for_delivery' && incoming().status == 'delivered')
+                )
+              )
+            )
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // LOCALITIES (PUBLIC READ, STRICT ADMIN WRITE)
+    // =========================================================================
+    match /localities/{localityId} {
+      allow get: if isValidId(localityId);
+      allow list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // DRIVERS (OWNER & ADMIN ONLY - PROTECTS PHONE & LICENSE PII)
+    // =========================================================================
+    match /drivers/{driverId} {
+      allow get: if isValidId(driverId) && (isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
+      allow create: if isValidId(driverId) &&
+        isSignedIn() &&
+        incoming().name is string && incoming().name.size() <= 120 &&
+        incoming().phone is string && incoming().phone.size() <= 30 &&
+        (
+          isAdmin() ||
+          (
+            incoming().ownerId == request.auth.uid &&
+            incoming().status == 'pending' &&
+            (!('approvalStatus' in incoming()) || incoming().approvalStatus == 'pending')
+          )
+        );
+      allow update: if isValidId(driverId) &&
+        (
+          isAdmin() ||
+          (
+            isSignedIn() &&
+            existing().ownerId == request.auth.uid &&
+            incoming().ownerId == existing().ownerId &&
+            incoming().status == existing().status &&
+            !incoming().diff(existing()).affectedKeys().hasAny(['status', 'approvalStatus', 'ownerId'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // RIDE BOOKINGS (CUSTOMER, ASSIGNED DRIVER, ADMIN ONLY;
+    // NOTE: Atomic driver claiming & fare confirmation require BACKEND REQUIRED)
+    // =========================================================================
+    match /rideBookings/{rideId} {
+      allow get: if isValidId(rideId) &&
+        isSignedIn() &&
+        (
+          isAdmin() ||
+          ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+          ('driverId' in existing() && (existing().driverId == request.auth.uid || isApprovedDriverOwner(existing().driverId)))
+        );
+      allow list: if isAdmin() ||
+        (
+          isSignedIn() &&
+          (
+            ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+            ('driverId' in existing() && (existing().driverId == request.auth.uid || isApprovedDriverOwner(existing().driverId)))
+          )
+        );
+      allow create: if isValidId(rideId) &&
+        isSignedIn() &&
+        incoming().customerId == request.auth.uid &&
+        incoming().status in ['REQUESTED', 'OFFER_SENT'] &&
+        incoming().vehicleType in ['taxi', 'auto', 'toto'] &&
+        incoming().customerName is string && incoming().customerName.size() > 0 && incoming().customerName.size() <= 120 &&
+        incoming().customerPhone is string && incoming().customerPhone.size() > 0 && incoming().customerPhone.size() <= 30 &&
+        incoming().pickupLocation is string && incoming().pickupLocation.size() > 0 && incoming().pickupLocation.size() <= 200 &&
+        incoming().dropLocation is string && incoming().dropLocation.size() > 0 && incoming().dropLocation.size() <= 200 &&
+        incoming().estimatedFare is number && incoming().estimatedFare >= 0 &&
+        (!('customerProposedFare' in incoming()) || (incoming().customerProposedFare is number && incoming().customerProposedFare >= 0)) &&
+        !('driverId' in incoming()) &&
+        !('driverName' in incoming()) &&
+        !('driverPhone' in incoming()) &&
+        !('vehicleNumber' in incoming()) &&
+        !('driverRating' in incoming()) &&
+        !('agreedFare' in incoming());
+      allow update: if isValidId(rideId) &&
+        isSignedIn() &&
+        (
+          isAdmin() ||
+          (
+            existing().customerId == request.auth.uid &&
+            incoming().customerId == existing().customerId &&
+            !(existing().status in ['COMPLETED', 'CANCELLED', 'completed', 'cancelled']) &&
+            (
+              (
+                incoming().status in ['CANCELLED', 'cancelled'] &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              ) ||
+              (
+                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
+                incoming().status in ['REQUESTED', 'OFFER_SENT'] &&
+                (!('customerProposedFare' in incoming()) || (incoming().customerProposedFare is number && incoming().customerProposedFare >= 0)) &&
+                !('driverId' in incoming()) &&
+                !('driverName' in incoming()) &&
+                !('driverPhone' in incoming()) &&
+                !('vehicleNumber' in incoming()) &&
+                !('driverRating' in incoming()) &&
+                !('agreedFare' in incoming()) &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'customerProposedFare', 'activeDriverOffers',
+                  'negotiationHistory', 'currentRound', 'updatedAt'
+                ])
+              )
+            )
+          ) ||
+          (
+            ('driverId' in existing()) &&
+            ('driverId' in incoming()) &&
+            (existing().driverId == request.auth.uid || isApprovedDriverOwner(existing().driverId)) &&
+            incoming().customerId == existing().customerId &&
+            incoming().driverId == existing().driverId &&
+            (!('agreedFare' in existing()) || incoming().agreedFare == existing().agreedFare) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+            (
+              (existing().status in ['CONFIRMED', 'accepted'] && incoming().status in ['PICKUP', 'driver_arriving']) ||
+              (existing().status in ['PICKUP', 'driver_arriving'] && incoming().status in ['IN_PROGRESS', 'ride_started']) ||
+              (existing().status in ['IN_PROGRESS', 'ride_started'] && incoming().status in ['COMPLETED', 'completed'])
+            )
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // DELIVERY FLEET (OWNER & ADMIN ONLY) & NON-PII APPROVED RIDER CARDS
+    // =========================================================================
+    match /deliveryPersons/{personId} {
+      allow get: if isValidId(personId) && (isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
+      allow create: if isValidId(personId) &&
+        isSignedIn() &&
+        (isAdmin() || (incoming().ownerId == request.auth.uid && incoming().status == 'pending'));
+      allow update: if isValidId(personId) &&
+        (
+          isAdmin() ||
+          (
+            isSignedIn() &&
+            existing().ownerId == request.auth.uid &&
+            incoming().ownerId == existing().ownerId &&
+            incoming().status == existing().status &&
+            !incoming().diff(existing()).affectedKeys().hasAny(['status', 'ownerId'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /publicRiders/{riderId} {
+      allow get: if isValidId(riderId) && ((isSignedIn() && existing().status == 'approved') || isAdmin());
+      allow list: if (isSignedIn() && existing().status == 'approved') || isAdmin();
+      allow create, update: if isValidId(riderId) && isAdmin() && isValidPublicRiderCard(incoming());
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // PARCEL DELIVERIES (CUSTOMER, ASSIGNED DELIVERY RIDER, ADMIN ONLY;
+    // NOTE: Atomic unassigned courier claiming requires BACKEND REQUIRED)
+    // =========================================================================
+    match /deliveries/{deliveryId} {
+      allow get: if isValidId(deliveryId) &&
+        isSignedIn() &&
+        (
+          isAdmin() ||
+          ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+          ('assignedDeliveryPersonId' in existing() && (existing().assignedDeliveryPersonId == request.auth.uid || isApprovedDeliveryOwner(existing().assignedDeliveryPersonId)))
+        );
+      allow list: if isAdmin() ||
+        (
+          isSignedIn() &&
+          (
+            ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+            ('assignedDeliveryPersonId' in existing() && (existing().assignedDeliveryPersonId == request.auth.uid || isApprovedDeliveryOwner(existing().assignedDeliveryPersonId)))
+          )
+        );
+      allow create: if isValidId(deliveryId) &&
+        isSignedIn() &&
+        incoming().customerId == request.auth.uid &&
+        incoming().status == 'pending_assignment' &&
+        incoming().senderName is string && incoming().senderName.size() > 0 && incoming().senderName.size() <= 120 &&
+        incoming().senderPhone is string && incoming().senderPhone.size() > 0 && incoming().senderPhone.size() <= 30 &&
+        incoming().senderAddress is string && incoming().senderAddress.size() > 0 && incoming().senderAddress.size() <= 500 &&
+        incoming().receiverName is string && incoming().receiverName.size() > 0 && incoming().receiverName.size() <= 120 &&
+        incoming().receiverPhone is string && incoming().receiverPhone.size() > 0 && incoming().receiverPhone.size() <= 30 &&
+        incoming().receiverAddress is string && incoming().receiverAddress.size() > 0 && incoming().receiverAddress.size() <= 500 &&
+        incoming().estimatedPrice is number && incoming().estimatedPrice >= 0 &&
+        !('assignedDeliveryPersonId' in incoming()) &&
+        !('assignedDeliveryPersonName' in incoming()) &&
+        !('assignedDeliveryPersonPhone' in incoming());
+      allow update: if isValidId(deliveryId) &&
+        isSignedIn() &&
+        (
+          isAdmin() ||
+          (
+            existing().customerId == request.auth.uid &&
+            incoming().customerId == existing().customerId &&
+            existing().status in ['pending_assignment', 'assigned'] &&
+            incoming().status == 'cancelled' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          ) ||
+          (
+            ('assignedDeliveryPersonId' in existing()) &&
+            ('assignedDeliveryPersonId' in incoming()) &&
+            (existing().assignedDeliveryPersonId == request.auth.uid || isApprovedDeliveryOwner(existing().assignedDeliveryPersonId)) &&
+            incoming().customerId == existing().customerId &&
+            incoming().assignedDeliveryPersonId == existing().assignedDeliveryPersonId &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+            (
+              (existing().status == 'assigned' && incoming().status == 'accepted') ||
+              (existing().status == 'accepted' && incoming().status == 'picked_up') ||
+              (existing().status == 'picked_up' && incoming().status == 'on_the_way') ||
+              (existing().status == 'on_the_way' && incoming().status in ['delivered', 'failed'])
+            )
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // PRIVATE SERVICE PROVIDERS & CONSISTENT SERVICE REQUEST OWNERSHIP
+    // Convention: serviceRequests.providerId ALWAYS stores /serviceProviders/{providerId} doc ID;
+    // serviceRequests.providerOwnerId stores that provider's Firebase Auth UID.
+    // Unassigned provider claiming requires BACKEND REQUIRED.
+    // =========================================================================
+    match /serviceProviders/{providerId} {
+      allow get: if isValidId(providerId) && (isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
+      allow create: if isValidId(providerId) &&
+        isSignedIn() &&
+        (isAdmin() || (incoming().ownerId == request.auth.uid && incoming().status == 'pending'));
+      allow update: if isValidId(providerId) &&
+        (
+          isAdmin() ||
+          (
+            isSignedIn() &&
+            existing().ownerId == request.auth.uid &&
+            incoming().ownerId == existing().ownerId &&
+            incoming().status == existing().status &&
+            !incoming().diff(existing()).affectedKeys().hasAny(['status', 'ownerId'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /publicServiceProviders/{providerId} {
+      allow get: if isValidId(providerId) && (existing().status == 'approved' || isAdmin());
+      allow list: if existing().status == 'approved' || isAdmin();
+      allow create, update: if isValidId(providerId) && isAdmin() && isValidPublicServiceProviderCard(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /serviceRequests/{requestId} {
+      allow get: if isValidId(requestId) &&
+        isSignedIn() &&
+        (
+          isAdmin() ||
+          ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+          ('providerOwnerId' in existing() && existing().providerOwnerId == request.auth.uid) ||
+          ('providerId' in existing() && isApprovedServiceProviderOwner(existing().providerId))
+        );
+      allow list: if isAdmin() ||
+        (
+          isSignedIn() &&
+          (
+            ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+            ('providerOwnerId' in existing() && existing().providerOwnerId == request.auth.uid)
+          )
+        );
+      allow create: if isValidId(requestId) &&
+        isSignedIn() &&
+        isValidServiceRequestData(incoming()) &&
+        incoming().customerId == request.auth.uid &&
+        incoming().status == 'requested' &&
+        !('providerId' in incoming()) &&
+        !('providerOwnerId' in incoming()) &&
+        !('providerName' in incoming()) &&
+        !('finalFee' in incoming());
+      allow update: if isValidId(requestId) &&
+        isSignedIn() &&
+        isValidServiceRequestData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            existing().customerId == request.auth.uid &&
+            incoming().customerId == existing().customerId &&
+            incoming().estimatedFee == existing().estimatedFee &&
+            !('providerId' in incoming().diff(existing()).affectedKeys()) &&
+            !('providerOwnerId' in incoming().diff(existing()).affectedKeys()) &&
+            !('providerName' in incoming().diff(existing()).affectedKeys()) &&
+            !('finalFee' in incoming().diff(existing()).affectedKeys()) &&
+            !(existing().status in ['completed', 'cancelled']) &&
+            (
+              (
+                incoming().status == 'cancelled' &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              ) ||
+              (
+                existing().status == 'requested' &&
+                incoming().status == 'requested' &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['preferredDate', 'preferredTime', 'issueDescription', 'updatedAt'])
+              )
+            )
+          ) ||
+          (
+            ('providerId' in existing()) &&
+            isApprovedServiceProviderOwner(existing().providerId) &&
+            incoming().providerId == existing().providerId &&
+            (!('providerOwnerId' in existing()) || incoming().providerOwnerId == existing().providerOwnerId) &&
+            incoming().customerId == existing().customerId &&
+            incoming().estimatedFee == existing().estimatedFee &&
+            !(existing().status in ['completed', 'cancelled']) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'finalFee', 'updatedAt']) &&
+            (
+              (existing().status == 'accepted' && incoming().status in ['accepted', 'in_progress', 'completed', 'cancelled']) ||
+              (existing().status == 'in_progress' && incoming().status in ['in_progress', 'completed', 'cancelled'])
+            )
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // PRIVATE JOBS (EMPLOYER & ADMIN ONLY) & PUBLIC JOB CARDS (STRICT ALLOWLIST)
+    // =========================================================================
+    match /jobs/{jobId} {
+      allow get: if isValidId(jobId) && (isAdmin() || (isSignedIn() && ('employerId' in existing()) && existing().employerId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && ('employerId' in existing()) && existing().employerId == request.auth.uid);
+      allow create: if isValidId(jobId) &&
+        isSignedIn() &&
+        isValidJobData(incoming()) &&
+        (isAdmin() || (incoming().employerId == request.auth.uid && incoming().status == 'pending'));
+      allow update: if isValidId(jobId) &&
+        isSignedIn() &&
+        isValidJobData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            existing().employerId == request.auth.uid &&
+            incoming().employerId == existing().employerId &&
+            incoming().status == existing().status &&
+            !incoming().diff(existing()).affectedKeys().hasAny(['status', 'employerId', 'id'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /publicJobs/{jobId} {
+      allow get: if isValidId(jobId) && (existing().status == 'approved' || isAdmin());
+      allow list: if existing().status == 'approved' || isAdmin();
+      allow create, update: if isValidId(jobId) && isAdmin() && isValidPublicJobCard(incoming());
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // JOB APPLICATIONS (VERIFIES REAL APPROVED JOB & REAL JOB OWNER; ANTI-SPOOFING)
+    // =========================================================================
+    match /jobApplications/{appId} {
+      allow get: if isValidId(appId) &&
+        isSignedIn() &&
+        (isAdmin() || ('applicantId' in existing() && existing().applicantId == request.auth.uid) || ('jobId' in existing() && isJobOwner(existing().jobId)));
+      allow list: if isAdmin() ||
+        (isSignedIn() && (('applicantId' in existing() && existing().applicantId == request.auth.uid) || ('jobId' in existing() && isJobOwner(existing().jobId))));
+      allow create: if isValidId(appId) &&
+        isSignedIn() &&
+        isValidJobApplicationData(incoming()) &&
+        incoming().applicantId == request.auth.uid &&
+        incoming().status == 'pending' &&
+        exists(/databases/$(database)/documents/jobs/$(incoming().jobId)) &&
+        get(/databases/$(database)/documents/jobs/$(incoming().jobId)).data.status == 'approved' &&
+        (
+          !('employerId' in incoming()) ||
+          incoming().employerId == get(/databases/$(database)/documents/jobs/$(incoming().jobId)).data.employerId
+        );
+      allow update: if isValidId(appId) &&
+        isSignedIn() &&
+        isValidJobApplicationData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            isJobOwner(existing().jobId) &&
+            incoming().jobId == existing().jobId &&
+            incoming().applicantId == existing().applicantId &&
+            (!('employerId' in existing()) || incoming().employerId == existing().employerId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // COMPLAINTS & TICKETS (PRIVATE CUSTOMER + ADMIN)
+    // =========================================================================
+    match /complaints/{complaintId} {
+      allow get: if isValidId(complaintId) && isSignedIn() && (isAdmin() || ('userId' in existing() && existing().userId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && ('userId' in existing() && existing().userId == request.auth.uid));
+      allow create: if isValidId(complaintId) &&
+        isSignedIn() &&
+        isValidComplaintData(incoming()) &&
+        incoming().userId == request.auth.uid &&
+        incoming().status == 'open';
+      allow update, delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // SCRAP REQUESTS (STRICT CUSTOMER + SELECTED BUYER ISOLATION;
+    // NOTE: Kabari buyer lead routing & offer submission require BACKEND REQUIRED)
+    // =========================================================================
+    match /scrapRequests/{requestId} {
+      allow get: if isValidId(requestId) &&
+        isSignedIn() &&
+        (
+          isAdmin() ||
+          ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+          ('selectedBuyerId' in existing() && existing().selectedBuyerId == request.auth.uid)
+        );
+      allow list: if isAdmin() ||
+        (
+          isSignedIn() &&
+          (
+            ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+            ('selectedBuyerId' in existing() && existing().selectedBuyerId == request.auth.uid)
+          )
+        );
+      allow create: if isValidId(requestId) &&
+        isSignedIn() &&
+        isValidScrapRequestData(incoming()) &&
+        incoming().customerId == request.auth.uid &&
+        incoming().status == 'open' &&
+        incoming().offers.size() == 0 &&
+        !('selectedOfferId' in incoming()) &&
+        !('selectedBuyerId' in incoming()) &&
+        !('selectedBuyerName' in incoming()) &&
+        !('selectedBuyerPhone' in incoming()) &&
+        !('finalPaidAmount' in incoming());
+      allow update: if isValidId(requestId) &&
+        isSignedIn() &&
+        isValidScrapRequestData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            existing().customerId == request.auth.uid &&
+            incoming().customerId == existing().customerId &&
+            !(existing().status in ['completed', 'cancelled']) &&
+            incoming().status == 'cancelled' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // PRIVATE DOCTOR PARTNERS (OWNER & ADMIN ONLY) & PUBLIC CARDS
+    // =========================================================================
+    match /doctors/{doctorId} {
+      allow get: if isValidId(doctorId) && (isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
+      allow create: if isValidId(doctorId) &&
+        isSignedIn() &&
+        incoming().name is string && incoming().name.size() <= 120 &&
+        (isAdmin() || (incoming().ownerId == request.auth.uid && incoming().status == 'pending'));
+      allow update: if isValidId(doctorId) &&
+        (
+          isAdmin() ||
+          (
+            isSignedIn() &&
+            existing().ownerId == request.auth.uid &&
+            incoming().ownerId == existing().ownerId &&
+            incoming().status == existing().status &&
+            !incoming().diff(existing()).affectedKeys().hasAny(['status', 'ownerId'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /publicDoctors/{doctorId} {
+      allow get: if isValidId(doctorId) && (existing().status == 'approved' || isAdmin());
+      allow list: if existing().status == 'approved' || isAdmin();
+      allow create, update: if isValidId(doctorId) && isAdmin() && isValidPublicDoctorCard(incoming());
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // EMERGENCY DOCTOR REQUESTS (HIGH-SENSITIVITY PATIENT MEDICAL PRIVACY;
+    // Unassigned & public doctors cannot read or claim; requires BACKEND REQUIRED)
+    // =========================================================================
+    match /emergencyDoctorRequests/{requestId} {
+      allow get: if isValidId(requestId) &&
+        isSignedIn() &&
+        (
+          isAdmin() ||
+          ('patientUserId' in existing() && existing().patientUserId == request.auth.uid) ||
+          ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+          ('doctorId' in existing() && existing().doctorId == request.auth.uid) ||
+          ('assignedDoctorId' in existing() && isApprovedDoctorOwner(existing().assignedDoctorId))
+        );
+      allow list: if isAdmin() ||
+        (
+          isSignedIn() &&
+          (
+            ('patientUserId' in existing() && existing().patientUserId == request.auth.uid) ||
+            ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+            ('doctorId' in existing() && existing().doctorId == request.auth.uid) ||
+            ('assignedDoctorId' in existing() && isApprovedDoctorOwner(existing().assignedDoctorId))
+          )
+        );
+      allow create: if isValidId(requestId) &&
+        isSignedIn() &&
+        isValidEmergencyRequestData(incoming()) &&
+        incoming().patientUserId == request.auth.uid &&
+        (!('customerId' in incoming()) || incoming().customerId == request.auth.uid) &&
+        incoming().status in ['searching', 'pending'] &&
+        !('assignedDoctorId' in incoming()) &&
+        !('doctorId' in incoming()) &&
+        !('assignedDoctorName' in incoming()) &&
+        !('assignedDoctorPhone' in incoming());
+      allow update: if isValidId(requestId) &&
+        isSignedIn() &&
+        isValidEmergencyRequestData(incoming()) &&
+        (
+          isAdmin() ||
+          (
+            existing().patientUserId == request.auth.uid &&
+            incoming().patientUserId == existing().patientUserId &&
+            !(existing().status in ['completed', 'cancelled']) &&
+            incoming().status == 'cancelled' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'cancellationReason', 'updatedAt'])
+          ) ||
+          (
+            (
+              ('doctorId' in existing() && existing().doctorId == request.auth.uid) ||
+              ('assignedDoctorId' in existing() && isApprovedDoctorOwner(existing().assignedDoctorId))
+            ) &&
+            incoming().patientUserId == existing().patientUserId &&
+            (!('assignedDoctorId' in existing()) || ('assignedDoctorId' in incoming() && incoming().assignedDoctorId == existing().assignedDoctorId)) &&
+            !(existing().status in ['completed', 'cancelled']) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'estimatedArrivalMinutes', 'etaMinutes', 'doctorNotes', 'notes', 'updatedAt'
+            ]) &&
+            (
+              (existing().status == 'accepted' && incoming().status in ['accepted', 'doctor_on_the_way', 'on_the_way', 'completed']) ||
+              (existing().status in ['doctor_on_the_way', 'on_the_way'] && incoming().status in ['doctor_on_the_way', 'on_the_way', 'completed'])
+            )
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // DISPATCH PROJECTIONS (LOCKED TO ADMIN UNTIL TRUSTED BACKEND EXISTS;
+    // No customer name, phone, address, medical symptoms, patient ID, or private refs)
+    // =========================================================================
+    match /rideDispatch/{dispatchId} {
+      allow read, delete: if isAdmin();
+      allow create, update: if isValidId(dispatchId) && isAdmin() && isValidRideDispatchData(incoming());
+    }
+
+    match /deliveryDispatch/{dispatchId} {
+      allow read, delete: if isAdmin();
+      allow create, update: if isValidId(dispatchId) && isAdmin() && isValidDeliveryDispatchData(incoming());
+    }
+
+    match /emergencyDispatch/{dispatchId} {
+      allow read, delete: if isAdmin();
+      allow create, update: if isValidId(dispatchId) && isAdmin() && isValidEmergencyDispatchData(incoming());
+    }
+
+    // =========================================================================
+    // ADMIN ACTIVITY LOGS & ADMINS REGISTRY (STRICT VERIFIED ADMIN ONLY)
+    // =========================================================================
+    match /adminActivity/{activityId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /admins/{adminId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+  }
+}

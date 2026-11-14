@@ -1,0 +1,6 @@
+{
+  "name": "Torsa Bazaar",
+  "description": "Your Local Super App for Torsa & Kalchini - Online Shopping, Taxi, Auto, Toto Booking, Local Delivery, Services, and Jobs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

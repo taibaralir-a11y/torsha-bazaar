@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGradMask" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0E7438"/>
+      <stop offset="50%" stop-color="#095528"/>
+      <stop offset="100%" stop-color="#043317"/>
+    </linearGradient>
+    <linearGradient id="cartGradMask" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E2F0D9"/>
+    </linearGradient>
+    <linearGradient id="leafGradMask" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#84CC16"/>
+      <stop offset="100%" stop-color="#22C55E"/>
+    </linearGradient>
+    <linearGradient id="orangeGradMask" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F97316"/>
+      <stop offset="100%" stop-color="#EA580C"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Full-bleed background for maskable adaptive icon -->
+  <rect width="512" height="512" fill="url(#bgGradMask)"/>
+
+  <!-- Centered inside 80% safe zone (scale 0.76 centered at 256, 256) -->
+  <g transform="translate(61, 56) scale(0.76)">
+    <!-- Sprouting Organic Fresh Leaves from Basket -->
+    <path d="M290 145 C290 100 340 90 355 125 C355 160 310 165 290 145 Z" fill="url(#leafGradMask)"/>
+    <path d="M255 165 C240 120 290 105 310 135 C310 170 270 180 255 165 Z" fill="#4ADE80"/>
+
+    <!-- Shopping Cart Grid & Frame -->
+    <path d="M125 180 H160 L185 305 C188 320 200 330 216 330 H345 C360 330 373 320 377 305 L395 210 H170" 
+          fill="none" stroke="url(#cartGradMask)" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+    
+    <!-- Cart Grid Lines -->
+    <line x1="215" y1="230" x2="225" y2="295" stroke="url(#cartGradMask)" stroke-width="14" stroke-linecap="round"/>
+    <line x1="265" y1="230" x2="270" y2="295" stroke="url(#cartGradMask)" stroke-width="14" stroke-linecap="round"/>
+    <line x1="315" y1="230" x2="315" y2="295" stroke="url(#cartGradMask)" stroke-width="14" stroke-linecap="round"/>
+    <line x1="180" y1="265" x2="375" y2="265" stroke="url(#cartGradMask)" stroke-width="14" stroke-linecap="round"/>
+
+    <!-- Left Wheel (Orange brand accent) -->
+    <circle cx="225" cy="375" r="30" fill="url(#orangeGradMask)"/>
+    <circle cx="225" cy="375" r="14" fill="#FFFFFF"/>
+
+    <!-- Right Wheel (Orange brand accent) -->
+    <circle cx="340" cy="375" r="30" fill="url(#orangeGradMask)"/>
+    <circle cx="340" cy="375" r="14" fill="#FFFFFF"/>
+
+    <!-- Brand Typography -->
+    <text x="256" y="445" font-family="'Plus Jakarta Sans', system-ui, sans-serif" font-weight="900" font-size="36" 
+          fill="#FFFFFF" text-anchor="middle" letter-spacing="3">TORSHA BAZAAR</text>
+  </g>
+</svg>

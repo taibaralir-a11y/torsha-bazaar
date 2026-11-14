@@ -1,0 +1,644 @@
+{
+  "entities": {
+    "Shop": {
+      "title": "Shop",
+      "description": "Registered local merchant shop in Torsa Bazaar",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "ownerEmail": { "type": "string" },
+        "name": { "type": "string" },
+        "address": { "type": "string" },
+        "locality": { "type": "string" },
+        "contactNumber": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected", "suspended"]
+        },
+        "rating": { "type": "number" },
+        "totalOrders": { "type": "number" },
+        "totalRevenue": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "ownerId", "name", "address", "locality", "contactNumber", "status"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Inventory product item listed by a shopkeeper",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "shopId": { "type": "string" },
+        "shopStatus": { "type": "string", "enum": ["pending", "approved", "rejected", "suspended"] },
+        "ownerId": { "type": "string" },
+        "name": { "type": "string" },
+        "localName": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "price": { "type": "number" },
+        "originalPrice": { "type": "number" },
+        "unit": { "type": "string" },
+        "stock": { "type": "number" },
+        "inStock": { "type": "boolean" },
+        "isAvailable": { "type": "boolean" },
+        "image": { "type": "string" },
+        "rating": { "type": "number" },
+        "isDeal": { "type": "boolean" },
+        "badge": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "shopId", "shopStatus", "ownerId", "name", "category", "price", "unit", "inStock"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer purchase order linked to shopkeeper and delivery",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "shopId": { "type": "string" },
+        "shopOwnerId": { "type": "string" },
+        "shopName": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "deliveryAddress": { "type": "string" },
+        "locality": { "type": "string" },
+        "items": { "type": "string" },
+        "subtotal": { "type": "number" },
+        "deliveryFee": { "type": "number" },
+        "discount": { "type": "number" },
+        "total": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "confirmed", "preparing", "ready_for_dispatch", "out_for_delivery", "delivered", "cancelled", "rejected", "placed", "packed"]
+        },
+        "paymentMethod": { "type": "string" },
+        "rejectionReason": { "type": "string" },
+        "riderId": { "type": "string" },
+        "riderName": { "type": "string" },
+        "riderPhone": { "type": "string" },
+        "estimatedDelivery": { "type": "string" },
+        "date": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "customerName", "customerPhone", "deliveryAddress", "total", "status", "paymentMethod"]
+    },
+    "Driver": {
+      "title": "Driver",
+      "description": "Registered Taxi, Auto or Toto driver in Kalchini and Dooars",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "vehicleType": {
+          "type": "string",
+          "enum": ["taxi", "auto", "toto"]
+        },
+        "vehicleNumber": { "type": "string" },
+        "locality": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected", "suspended"]
+        },
+        "isOnline": { "type": "boolean" },
+        "totalRides": { "type": "number" },
+        "rating": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name", "phone", "vehicleType", "vehicleNumber", "status"]
+    },
+    "RideBooking": {
+      "title": "RideBooking",
+      "description": "Local ride booking for Taxi, Auto and Toto (No bike taxi)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "vehicleType": {
+          "type": "string",
+          "enum": ["taxi", "auto", "toto"]
+        },
+        "pickupLocation": { "type": "string" },
+        "pickupLandmark": { "type": "string" },
+        "dropLocation": { "type": "string" },
+        "dropLandmark": { "type": "string" },
+        "estimatedFare": { "type": "number" },
+        "suggestedFare": { "type": "number" },
+        "customerProposedFare": { "type": "number" },
+        "agreedFare": { "type": "number" },
+        "distanceKm": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": [
+            "REQUESTED",
+            "OFFER_SENT",
+            "COUNTER_OFFERED",
+            "CUSTOMER_ACCEPTED",
+            "RIDER_ACCEPTED",
+            "CONFIRMED",
+            "REJECTED",
+            "EXPIRED",
+            "CANCELLED",
+            "PICKUP",
+            "IN_PROGRESS",
+            "COMPLETED",
+            "requested",
+            "searching",
+            "accepted",
+            "driver_arriving",
+            "ride_started",
+            "completed",
+            "cancelled"
+          ]
+        },
+        "driverId": { "type": "string" },
+        "driverName": { "type": "string" },
+        "driverPhone": { "type": "string" },
+        "vehicleNumber": { "type": "string" },
+        "driverRating": { "type": "number" },
+        "currentRound": { "type": "number" },
+        "maxNegotiationRounds": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "customerName", "customerPhone", "vehicleType", "pickupLocation", "dropLocation", "estimatedFare", "status"]
+    },
+    "DeliveryPerson": {
+      "title": "DeliveryPerson",
+      "description": "Delivery courier rider profile",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected", "suspended"]
+        },
+        "isOnline": { "type": "boolean" },
+        "locality": { "type": "string" },
+        "totalDelivered": { "type": "number" },
+        "rating": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name", "phone", "status"]
+    },
+    "DeliveryRequest": {
+      "title": "DeliveryRequest",
+      "description": "Parcel delivery booking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderPhone": { "type": "string" },
+        "senderAddress": { "type": "string" },
+        "senderLandmark": { "type": "string" },
+        "receiverName": { "type": "string" },
+        "receiverPhone": { "type": "string" },
+        "receiverAddress": { "type": "string" },
+        "receiverLandmark": { "type": "string" },
+        "parcelDescription": { "type": "string" },
+        "weightCategory": { "type": "string" },
+        "estimatedPrice": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": ["pending_assignment", "assigned", "accepted", "picked_up", "on_the_way", "delivered", "failed", "cancelled"]
+        },
+        "assignedDeliveryPersonId": { "type": "string" },
+        "assignedDeliveryPersonName": { "type": "string" },
+        "assignedDeliveryPersonPhone": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "senderName", "senderPhone", "senderAddress", "receiverName", "receiverPhone", "receiverAddress", "estimatedPrice", "status"]
+    },
+    "ServiceProvider": {
+      "title": "ServiceProvider",
+      "description": "Local skilled technician profile (Electrician, Plumber, etc.)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "category": { "type": "string" },
+        "serviceArea": { "type": "string" },
+        "description": { "type": "string" },
+        "experienceYears": { "type": "number" },
+        "hourlyRate": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected", "suspended"]
+        },
+        "isAvailable": { "type": "boolean" },
+        "rating": { "type": "number" },
+        "totalJobsCompleted": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name", "phone", "category", "serviceArea", "status"]
+    },
+    "ServiceRequest": {
+      "title": "ServiceRequest",
+      "description": "Home service job requested by customer",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "category": { "type": "string" },
+        "providerId": { "type": "string" },
+        "providerOwnerId": { "type": "string" },
+        "providerName": { "type": "string" },
+        "address": { "type": "string" },
+        "preferredDate": { "type": "string" },
+        "preferredTime": { "type": "string" },
+        "issueDescription": { "type": "string" },
+        "estimatedFee": { "type": "number" },
+        "finalFee": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": ["requested", "accepted", "in_progress", "completed", "cancelled"]
+        },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "customerName", "customerPhone", "category", "address", "status"]
+    },
+    "JobListing": {
+      "title": "JobListing",
+      "description": "Local employment vacancy posted by employer",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "employerId": { "type": "string" },
+        "employerName": { "type": "string" },
+        "employerPhone": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "location": { "type": "string" },
+        "salary": { "type": "string" },
+        "jobType": { "type": "string" },
+        "description": { "type": "string" },
+        "vacancies": { "type": "number" },
+        "applicantsCount": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"]
+        },
+        "publishContact": { "type": "boolean" },
+        "publicContactNumber": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "employerName", "employerPhone", "title", "category", "location", "status"]
+    },
+    "JobApplication": {
+      "title": "JobApplication",
+      "description": "Job application submitted by jobseeker against an approved job",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "jobId": { "type": "string" },
+        "applicantId": { "type": "string" },
+        "employerId": { "type": "string" },
+        "jobTitle": { "type": "string" },
+        "companyName": { "type": "string" },
+        "applicantName": { "type": "string" },
+        "applicantPhone": { "type": "string" },
+        "applicantNotes": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "shortlisted", "hired", "rejected"]
+        },
+        "appliedDate": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "jobId", "applicantId", "applicantName", "applicantPhone", "status"]
+    },
+    "Complaint": {
+      "title": "Complaint",
+      "description": "Customer or merchant grievance logged with admin",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "subject": { "type": "string" },
+        "description": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["open", "investigating", "resolved"]
+        },
+        "resolutionNotes": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "customerName", "subject", "description", "status"]
+    },
+    "ScrapRequest": {
+      "title": "ScrapRequest",
+      "description": "Customer request to sell recyclable scrap to local kabari buyers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "category": { "type": "string" },
+        "categoryLabel": { "type": "string" },
+        "estimatedWeight": { "type": "string" },
+        "description": { "type": "string" },
+        "photos": { "type": "string" },
+        "pickupAddress": { "type": "string" },
+        "locality": { "type": "string" },
+        "pincode": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["open", "offers_received", "accepted", "pickup_scheduled", "picked_up", "completed", "cancelled"]
+        },
+        "selectedOfferId": { "type": "string" },
+        "selectedBuyerName": { "type": "string" },
+        "selectedBuyerPhone": { "type": "string" },
+        "finalPaidAmount": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "customerName", "customerPhone", "category", "estimatedWeight", "pickupAddress", "locality", "pincode", "status"]
+    },
+    "Locality": {
+      "title": "Locality",
+      "description": "Centrally managed hyperlocal locality and verified postal PIN code in Dooars",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "pincode": { "type": "string" },
+        "parentArea": { "type": "string" },
+        "hubName": { "type": "string" },
+        "coordinates": { "type": "string" },
+        "popularLandmarks": { "type": "string" },
+        "isVerifiedPin": { "type": "boolean" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "pincode", "parentArea"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Customer profile and delivery coordinates",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "location": { "type": "string" },
+        "pincode": { "type": "string" },
+        "state": { "type": "string" },
+        "district": { "type": "string" },
+        "block": { "type": "string" },
+        "address": { "type": "string" },
+        "isVerified": { "type": "boolean" },
+        "isSessionAuthenticated": { "type": "boolean" },
+        "isPhoneVerified": { "type": "boolean" },
+        "authMethod": { "type": "string", "enum": ["anonymous", "google", "email", "phone", "none"] }
+      },
+      "required": ["name", "phone", "location"]
+    },
+    "Doctor": {
+      "title": "Doctor",
+      "description": "Registered healthcare physician in Dooars",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "suspended"] },
+        "consultationFee": { "type": "number" },
+        "medicalCouncilRegNo": { "type": "string" }
+      },
+      "required": ["id", "name", "phone", "status"]
+    },
+    "EmergencyDoctorRequest": {
+      "title": "EmergencyDoctorRequest",
+      "description": "24x7 emergency medical request and home visit booking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "patientName": { "type": "string" },
+        "patientPhone": { "type": "string" },
+        "status": { "type": "string" },
+        "locality": { "type": "string" }
+      },
+      "required": ["id", "patientName", "patientPhone", "status", "locality"]
+    },
+    "RideDispatchSummary": {
+      "title": "RideDispatchSummary",
+      "description": "Non-PII dispatch summary projection for Taxi, Auto, and Toto requests prior to assignment",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "rideId": { "type": "string" },
+        "vehicleType": { "type": "string", "enum": ["taxi", "auto", "toto"] },
+        "pickupLocality": { "type": "string" },
+        "dropLocality": { "type": "string" },
+        "estimatedFare": { "type": "number" },
+        "customerProposedFare": { "type": "number" },
+        "status": { "type": "string" },
+        "assignedDriverId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "rideId", "vehicleType", "pickupLocality", "dropLocality", "estimatedFare", "status"]
+    },
+    "DeliveryDispatchSummary": {
+      "title": "DeliveryDispatchSummary",
+      "description": "Non-PII parcel dispatch summary projection prior to rider assignment",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "deliveryId": { "type": "string" },
+        "pickupLocality": { "type": "string" },
+        "dropLocality": { "type": "string" },
+        "parcelCategory": { "type": "string" },
+        "weightCategory": { "type": "string" },
+        "estimatedPrice": { "type": "number" },
+        "status": { "type": "string" },
+        "assignedDeliveryPersonId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "deliveryId", "pickupLocality", "dropLocality", "estimatedPrice", "status"]
+    },
+    "EmergencyDispatchSummary": {
+      "title": "EmergencyDispatchSummary",
+      "description": "Non-PII emergency dispatch projection (locality, priority, request type only; no patient name, phone, address, or symptoms prior to assignment)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "requestId": { "type": "string" },
+        "locality": { "type": "string" },
+        "pincode": { "type": "string" },
+        "priority": { "type": "string" },
+        "requestType": { "type": "string" },
+        "status": { "type": "string" },
+        "assignedDoctorId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "requestId", "locality", "pincode", "priority", "requestType", "status"]
+    },
+    "PublicShopCard": {
+      "title": "PublicShopCard",
+      "description": "Public non-PII storefront card (excludes ownerId, ownerEmail, private phone, licenseNumber, hygieneCertificate, totalRevenue, totalOrders)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "locality": { "type": "string" },
+        "pincode": { "type": "string" },
+        "category": { "type": "string" },
+        "shopType": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "suspended"] },
+        "isVerified": { "type": "boolean" },
+        "isOpen": { "type": "boolean" },
+        "deliveryCharge": { "type": "number" },
+        "publishContact": { "type": "boolean" },
+        "publicContactNumber": { "type": "string" }
+      },
+      "required": ["id", "name", "locality", "category", "status"]
+    },
+    "PublicDoctorCard": {
+      "title": "PublicDoctorCard",
+      "description": "Public non-PII doctor directory card (excludes ownerId, phone, email, clinicAddress, medicalCouncilRegNo, documentUrl)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "qualification": { "type": "string" },
+        "specialization": { "type": "string" },
+        "consultationFee": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "suspended"] },
+        "rating": { "type": "number" }
+      },
+      "required": ["id", "name", "qualification", "specialization", "consultationFee", "status"]
+    },
+    "PublicServiceProviderCard": {
+      "title": "PublicServiceProviderCard",
+      "description": "Public non-PII technician card (excludes ownerId and private phone)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "serviceArea": { "type": "string" },
+        "hourlyRate": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "suspended"] },
+        "isAvailable": { "type": "boolean" }
+      },
+      "required": ["id", "name", "category", "serviceArea", "hourlyRate", "status"]
+    },
+    "PublicProductCard": {
+      "title": "PublicProductCard",
+      "description": "Public non-PII approved product projection (excludes ownerId)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "shopId": { "type": "string" },
+        "shopName": { "type": "string" },
+        "shopStatus": { "type": "string", "enum": ["pending", "approved", "rejected", "suspended"] },
+        "name": { "type": "string" },
+        "price": { "type": "number" },
+        "unit": { "type": "string" },
+        "category": { "type": "string" },
+        "inStock": { "type": "boolean" },
+        "isAvailable": { "type": "boolean" }
+      },
+      "required": ["id", "shopId", "shopStatus", "name", "price", "unit", "category", "inStock"]
+    },
+    "PublicJobCard": {
+      "title": "PublicJobCard",
+      "description": "Public non-PII approved job projection (excludes employerId, employerName, private phone unless publishContact == true)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "company": { "type": "string" },
+        "category": { "type": "string" },
+        "location": { "type": "string" },
+        "salary": { "type": "string" },
+        "jobType": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "publishContact": { "type": "boolean" },
+        "publicContactNumber": { "type": "string" }
+      },
+      "required": ["id", "title", "company", "category", "location", "salary", "jobType", "status"]
+    },
+    "PublicRiderCard": {
+      "title": "PublicRiderCard",
+      "description": "Signed-in non-PII approved fleet rider projection (excludes ownerId, phone, email)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "locality": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "suspended"] },
+        "isOnline": { "type": "boolean" },
+        "rating": { "type": "number" }
+      },
+      "required": ["id", "name", "locality", "status"]
+    },
+    "AdminActivity": {
+      "title": "AdminActivity",
+      "description": "Super Admin audit trail entries",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "adminEmail": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "adminEmail", "action", "details", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/customers/{customerId}": { "schema": "Customer", "description": "Customer profiles and delivery localities" },
+    "/doctors/{doctorId}": { "schema": "Doctor", "description": "Private registered physician records (owner & admin only)" },
+    "/publicDoctors/{doctorId}": { "schema": "PublicDoctorCard", "description": "Public non-PII approved physician directory cards" },
+    "/emergencyDoctorRequests/{requestId}": { "schema": "EmergencyDoctorRequest", "description": "Urgent medical home visit requests" },
+    "/shops/{shopId}": { "schema": "Shop", "description": "Private merchant shop records (owner & admin only)" },
+    "/publicShops/{shopId}": { "schema": "PublicShopCard", "description": "Public non-PII approved shop directory cards" },
+    "/products/{productId}": { "schema": "Product", "description": "Private owner-managed products (owner & admin only; contains ownerId)" },
+    "/publicProducts/{productId}": { "schema": "PublicProductCard", "description": "Public non-PII approved products (no ownerId; parent shop verified)" },
+    "/orders/{orderId}": { "schema": "Order", "description": "Customer store orders" },
+    "/localities/{localityId}": { "schema": "Locality", "description": "Centrally managed Dooars localities" },
+    "/drivers/{driverId}": { "schema": "Driver", "description": "Taxi, Auto, Toto drivers" },
+    "/rideBookings/{rideId}": { "schema": "RideBooking", "description": "Ride hailing requests" },
+    "/deliveryPersons/{personId}": { "schema": "DeliveryPerson", "description": "Private courier delivery fleet records (owner & admin only)" },
+    "/publicRiders/{riderId}": { "schema": "PublicRiderCard", "description": "Signed-in non-PII approved rider cards for dispatch verification" },
+    "/deliveries/{deliveryId}": { "schema": "DeliveryRequest", "description": "Parcel dispatch requests" },
+    "/serviceProviders/{providerId}": { "schema": "ServiceProvider", "description": "Private local technician records (owner & admin only)" },
+    "/publicServiceProviders/{providerId}": { "schema": "PublicServiceProviderCard", "description": "Public non-PII approved technician directory cards" },
+    "/serviceRequests/{requestId}": { "schema": "ServiceRequest", "description": "Home service appointments" },
+    "/jobs/{jobId}": { "schema": "JobListing", "description": "Private employer job vacancies (employer & admin only)" },
+    "/publicJobs/{jobId}": { "schema": "PublicJobCard", "description": "Public non-PII approved job directory cards" },
+    "/jobApplications/{appId}": { "schema": "JobApplication", "description": "Job applications verified against /jobs/{jobId}" },
+    "/complaints/{complaintId}": { "schema": "Complaint", "description": "Support tickets" },
+    "/scrapRequests/{requestId}": { "schema": "ScrapRequest", "description": "Kabari scrap selling requests and offers" },
+    "/rideDispatch/{dispatchId}": { "schema": "RideDispatchSummary", "description": "Non-PII ride dispatch feed (Admin/Backend locked)" },
+    "/deliveryDispatch/{dispatchId}": { "schema": "DeliveryDispatchSummary", "description": "Non-PII delivery dispatch feed (Admin/Backend locked)" },
+    "/emergencyDispatch/{dispatchId}": { "schema": "EmergencyDispatchSummary", "description": "Non-PII emergency dispatch feed (Admin/Backend locked)" },
+    "/adminActivity/{activityId}": { "schema": "AdminActivity", "description": "Verified Super Admin audit logs" }
+  }
+}
