@@ -6,7 +6,7 @@ import { ShopProductsTab } from './ShopProductsTab';
 import { ShopProfileTab } from './ShopProfileTab';
 import { ShopHistoryTab } from './ShopHistoryTab';
 import { AddEditProductModal } from './AddEditProductModal';
-import { Shop, Order, Product, OrderStatus, ShopApprovalStatus, LocalityInfo, PublicRiderCard } from '../../types';
+import { Shop, Order, Product, OrderStatus, ShopApprovalStatus, LocalityInfo, PublicRiderCard, DeliveryPerson, UniversalRoutingConfig, PartnerAccount } from '../../types';
 import { 
   LayoutDashboard, 
   ShoppingBag, 
@@ -22,15 +22,20 @@ interface ShopkeeperDashboardProps {
   orders: Order[];
   products: Product[];
   approvedRiders?: PublicRiderCard[];
+  deliveryPersons?: DeliveryPerson[];
+  routingConfig?: UniversalRoutingConfig;
+  partnerAccounts?: PartnerAccount[];
   localities?: LocalityInfo[];
   onSwitchToCustomer: () => void;
   onUpdateShop: (updatedData: Partial<Shop>) => void;
   onAdminChangeStatus: (status: ShopApprovalStatus) => void;
   onUpdateOrderStatus: (orderId: string, status: OrderStatus, extra?: { rejectionReason?: string; riderId?: string; riderName?: string }) => void;
+  onReviewReturnRequest?: (orderId: string, decision: 'approved' | 'rejected', notes?: string) => Promise<{ ok: boolean; error?: string }>;
   onAddProduct: (productData: Partial<Product>) => void;
   onUpdateProduct: (productId: string, updatedData: Partial<Product>) => void;
   onDeleteProduct: (productId: string) => void;
   onToggleAvailability: (productId: string) => void;
+  onLogout?: () => void;
 }
 
 export const ShopkeeperDashboard: React.FC<ShopkeeperDashboardProps> = ({
@@ -39,22 +44,28 @@ export const ShopkeeperDashboard: React.FC<ShopkeeperDashboardProps> = ({
   orders,
   products,
   approvedRiders = [],
+  deliveryPersons,
+  routingConfig,
+  partnerAccounts = [],
   onSwitchToCustomer,
   onUpdateShop,
   onAdminChangeStatus,
   onUpdateOrderStatus,
+  onReviewReturnRequest,
   onAddProduct,
   onUpdateProduct,
   onDeleteProduct,
   onToggleAvailability,
-  localities
+  localities,
+  onLogout
 }) => {
   const [activeTab, setActiveTab] = useState<'overview' | 'orders' | 'products' | 'profile' | 'history'>('overview');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [productToEdit, setProductToEdit] = useState<Product | null>(null);
 
   const shopOrders = orders.filter((o) => !o.shopId || o.shopId === shop.id);
-  const pendingOrdersCount = shopOrders.filter((o) => o.status === 'pending').length;
+  const pendingOrdersCount = shopOrders.filter((o) => o.status === 'pending' || o.status === 'placed').length;
+  const pendingReturnCount = shopOrders.filter((o) => o.returnRequest?.status === 'pending_review').length;
 
   const handleSaveProduct = (productData: Partial<Product>) => {
     if (productToEdit) {
@@ -71,7 +82,7 @@ export const ShopkeeperDashboard: React.FC<ShopkeeperDashboardProps> = ({
       id: 'orders' as const, 
       label: 'Live Orders', 
       icon: ShoppingBag,
-      badge: pendingOrdersCount > 0 ? pendingOrdersCount : undefined
+      badge: pendingOrdersCount + pendingReturnCount > 0 ? pendingOrdersCount + pendingReturnCount : undefined
     },
     { id: 'products' as const, label: 'Products', icon: Package },
     { id: 'profile' as const, label: 'Shop Info', icon: Store },
@@ -87,6 +98,7 @@ export const ShopkeeperDashboard: React.FC<ShopkeeperDashboardProps> = ({
           isAdmin={isAdmin}
           onSwitchToCustomer={onSwitchToCustomer}
           onAdminChangeStatus={onAdminChangeStatus}
+          onLogout={onLogout}
         />
 
         {/* Tab Selector Strip */}
@@ -141,7 +153,11 @@ export const ShopkeeperDashboard: React.FC<ShopkeeperDashboardProps> = ({
               orders={orders}
               isAdmin={isAdmin}
               approvedRiders={approvedRiders}
+              deliveryPersons={deliveryPersons}
+              routingConfig={routingConfig}
+              partnerAccounts={partnerAccounts}
               onUpdateOrderStatus={onUpdateOrderStatus}
+              onReviewReturnRequest={onReviewReturnRequest}
             />
           )}
 
@@ -176,6 +192,7 @@ export const ShopkeeperDashboard: React.FC<ShopkeeperDashboardProps> = ({
             <ShopHistoryTab
               shop={shop}
               orders={orders}
+              onReviewReturnRequest={onReviewReturnRequest}
             />
           )}
         </main>

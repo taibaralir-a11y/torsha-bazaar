@@ -9,6 +9,94 @@ export type PortalMode =
   | 'kabari' // Kabari Buyer Portal
   | 'doctor'; // Emergency Doctor & Home Visit Partner Portal
 
+export type PartnerRoleType =
+  | 'shopkeeper'
+  | 'driver'
+  | 'delivery'
+  | 'doctor'
+  | 'service_provider'
+  | 'employer'
+  | 'kabari';
+
+export type PartnerAccountStatus = 'active' | 'suspended';
+
+export interface PartnerAccount {
+  uid: string;
+  role: PartnerRoleType;
+  businessPartnerType?: string;
+  displayName: string;
+  loginEmail: string;
+  phone?: string;
+  linkedEntityId?: string;
+  status: PartnerAccountStatus;
+  suspendedEntityPreviousStatus?: ShopApprovalStatus;
+  assignedBy: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface CreatePartnerAccountInput {
+  role: PartnerRoleType;
+  displayName: string;
+  loginEmail: string;
+  phone?: string;
+  password: string;
+  sendPasswordReset?: boolean;
+  locality: string;
+  pincode?: string;
+  linkExistingEntityId?: string;
+  // Shopkeeper provisioning fields
+  shopName?: string;
+  shopCategory?: string;
+  shopAddress?: string;
+  shopContactPhone?: string;
+  deliveryAreas?: string[];
+  // Driver provisioning fields (toto | auto | taxi only)
+  vehicleType?: VehicleType;
+  vehicleNumber?: string;
+  licenseNumber?: string;
+  // Shared multi-locality field (driver, delivery, doctor, service_provider)
+  servedLocalities?: string[];
+  // Doctor provisioning fields
+  qualification?: string;
+  specialization?: DoctorSpecialization;
+  medicalCouncilRegNo?: string;
+  clinicAddress?: string;
+  consultationFee?: number;
+  homeVisitFee?: number;
+  experienceYears?: number;
+  // Service Provider provisioning fields
+  serviceCategory?: ServiceCategoryType;
+  hourlyRate?: number;
+  serviceDescription?: string;
+}
+
+export interface AdminShopUpdateInput {
+  name: string;
+  category: string;
+  shopType?: ShopCategoryType;
+  address: string;
+  locality: string;
+  pincode: string;
+  contactNumber: string;
+  publishContact?: boolean;
+  publicContactNumber?: string;
+  businessHours?: string;
+  description?: string;
+  imageUrl?: string;
+  deliveryAreas: string[];
+  deliveryCharge: number;
+  freeDeliveryAbove?: number;
+  deliveryRadiusKm: number;
+  isOpen: boolean;
+  status: ShopApprovalStatus;
+}
+
+export interface PhoneAuthLookup {
+  loginEmail: string;
+  updatedAt: string;
+}
+
 export type AppTab = 'home' | 'categories' | 'orders' | 'account' | 'more';
 
 export type ServiceType = 
@@ -54,6 +142,7 @@ export interface Shop {
   isVerified: boolean;
   isOpen: boolean;
   deliveryAreas: string[]; // e.g. ['Hasimara', 'Satali']
+  servedLocalities?: string[];
   deliveryCharge: number;
   freeDeliveryAbove?: number;
   deliveryRadiusKm: number;
@@ -199,6 +288,28 @@ export interface CartItem {
   prescriptionNotes?: string;
 }
 
+export type ReturnReason = 'Damaged or defective items' | 'Wrong items delivered';
+
+export type ReturnRequestStatus = 'pending_review' | 'approved' | 'rejected';
+
+export interface OrderReturnRequest {
+  id: string;
+  orderId: string;
+  customerId: string;
+  customerName?: string;
+  customerPhone?: string;
+  shopId?: string;
+  shopName?: string;
+  reason: ReturnReason;
+  description?: string;
+  photoEvidenceUrl?: string;
+  status: ReturnRequestStatus;
+  reviewNotes?: string;
+  reviewedBy?: 'admin' | 'shopkeeper';
+  requestedAt: string;
+  reviewedAt?: string;
+}
+
 export interface Order {
   id: string;
   shopId?: string;
@@ -217,10 +328,14 @@ export interface Order {
   date: string;
   deliveryAddress: string;
   locality?: string;
+  pickupLocality?: string;
   pincode?: string;
   riderId?: string;
   riderName?: string;
   riderPhone?: string;
+  riderLocality?: string;
+  routingStatus?: RequestRoutingStatus;
+  assignmentHistory?: AssignmentAuditEntry[];
   estimatedDelivery: string;
   paymentMethod: string;
   prescriptionUrl?: string;
@@ -228,6 +343,7 @@ export interface Order {
   finalWeightGrams?: number;
   confirmedByShopkeeper?: boolean;
   rejectionReason?: string;
+  returnRequest?: OrderReturnRequest;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -266,6 +382,7 @@ export interface ScrapOffer {
   notes?: string;
   status: 'pending' | 'accepted' | 'rejected';
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface ScrapRequest {
@@ -285,10 +402,27 @@ export interface ScrapRequest {
   status: ScrapRequestStatus;
   offers: ScrapOffer[];
   selectedOfferId?: string;
+  selectedBuyerId?: string;
   selectedBuyerName?: string;
   selectedBuyerPhone?: string;
   finalPaidAmount?: number;
   paymentMethod?: 'Cash on Pickup' | 'UPI Transfer';
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface PublicScrapListing {
+  id: string;
+  category: ScrapCategory;
+  categoryLabel: string;
+  estimatedWeight: string;
+  approxWeightKg?: number;
+  description: string;
+  photos: string[];
+  locality: string;
+  pincode: string;
+  status: ScrapRequestStatus;
+  myOffer?: ScrapOffer;
   createdAt: string;
   updatedAt?: string;
 }
@@ -383,6 +517,22 @@ export interface Driver {
   totalRides: number;
   rating: number;
   createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface PublicDriverCard {
+  id: string;
+  name: string;
+  vehicleType: VehicleType;
+  locality: string;
+  currentLocation?: string;
+  servedLocalities?: string[];
+  status: ShopApprovalStatus;
+  isOnline: boolean;
+  accountStatus?: PartnerAccountStatus;
+  rating: number;
+  totalRides?: number;
+  updatedAt?: string;
 }
 
 export interface RideBooking {
@@ -392,8 +542,10 @@ export interface RideBooking {
   customerPhone: string;
   vehicleType: VehicleType;
   pickupLocation: string;
+  pickupLocality?: string;
   pickupLandmark?: string;
   dropLocation: string;
+  dropLocality?: string;
   dropLandmark?: string;
   distanceKm?: number;
   estimatedFare: number; // Guidance / suggested base fare
@@ -404,8 +556,11 @@ export interface RideBooking {
   driverId?: string;
   driverName?: string;
   driverPhone?: string;
+  driverLocality?: string;
   vehicleNumber?: string;
   driverRating?: number;
+  routingStatus?: RequestRoutingStatus;
+  assignmentHistory?: AssignmentAuditEntry[];
   negotiationHistory?: FareOffer[];
   activeDriverOffers?: FareOffer[];
   maxNegotiationRounds?: number;
@@ -448,6 +603,8 @@ export interface DeliveryPerson {
   status: ShopApprovalStatus;
   isOnline: boolean;
   locality: string;
+  currentLocation?: string;
+  servedLocalities?: string[];
   totalDelivered: number;
   rating: number;
   createdAt?: string;
@@ -458,8 +615,11 @@ export interface PublicRiderCard {
   id: string;
   name: string;
   locality: string;
+  currentLocation?: string;
+  servedLocalities?: string[];
   status: ShopApprovalStatus;
   isOnline: boolean;
+  accountStatus?: PartnerAccountStatus;
   rating: number;
   updatedAt?: string;
 }
@@ -470,10 +630,12 @@ export interface DeliveryRequest {
   senderName: string;
   senderPhone: string;
   senderAddress: string;
+  pickupLocality?: string;
   senderLandmark?: string;
   receiverName: string;
   receiverPhone: string;
   receiverAddress: string;
+  dropLocality?: string;
   receiverLandmark?: string;
   parcelDescription: string;
   weightCategory: string;
@@ -482,6 +644,9 @@ export interface DeliveryRequest {
   assignedDeliveryPersonId?: string;
   assignedDeliveryPersonName?: string;
   assignedDeliveryPersonPhone?: string;
+  assignedDeliveryPersonLocality?: string;
+  routingStatus?: RequestRoutingStatus;
+  assignmentHistory?: AssignmentAuditEntry[];
   createdAt?: string;
   updatedAt?: string;
 }
@@ -515,6 +680,8 @@ export interface ServiceProvider {
   phone: string;
   category: ServiceCategoryType;
   serviceArea: string;
+  currentLocation?: string;
+  servedLocalities?: string[];
   description: string;
   experienceYears: number;
   hourlyRate: number;
@@ -557,13 +724,17 @@ export interface ServiceRequest {
   providerId?: string;
   providerOwnerId?: string;
   providerName?: string;
+  providerLocality?: string;
   address: string;
+  locality?: string;
   preferredDate: string;
   preferredTime: string;
   issueDescription: string;
   estimatedFee: number;
   finalFee?: number;
   status: ServiceRequestStatus;
+  routingStatus?: RequestRoutingStatus;
+  assignmentHistory?: AssignmentAuditEntry[];
   createdAt?: string;
   updatedAt?: string;
 }
@@ -668,11 +839,21 @@ export interface Complaint {
   targetId?: string;
   targetName?: string;
   category?: string;
-  type?: 'order' | 'rider' | 'shop' | 'service';
+  type?: 'order' | 'rider' | 'shop' | 'service' | 'return_request';
   subject?: string;
   description: string;
   status: 'open' | 'investigating' | 'resolved';
   resolutionNotes?: string;
+  orderId?: string;
+  shopId?: string;
+  shopName?: string;
+  shopOwnerId?: string;
+  returnReason?: ReturnReason;
+  returnStatus?: ReturnRequestStatus;
+  customerDescription?: string;
+  photoEvidenceUrl?: string;
+  reviewedBy?: 'admin' | 'shopkeeper';
+  reviewedAt?: string;
   createdAt: string;
 }
 
@@ -884,4 +1065,85 @@ export interface EmergencyDispatchSummary {
   updatedAt?: string;
 }
 
+// ==========================================
+// UNIVERSAL LOCALITY-BASED ADMIN ROUTING
+// ==========================================
+export type RoutingServiceCategory =
+  | 'shop_order'
+  | 'delivery'
+  | 'ride'
+  | 'service';
+
+export type RequestRoutingStatus =
+  | 'pending_admin_routing'
+  | 'assigned'
+  | 'unavailable_in_locality';
+
+export interface AssignmentAuditEntry {
+  id: string;
+  requestId: string;
+  serviceCategory: RoutingServiceCategory;
+  requestLocality: string;
+  partnerId?: string;
+  partnerName?: string;
+  partnerRole: PartnerRoleType;
+  partnerBaseLocality?: string;
+  partnerCurrentLocation?: string;
+  action:
+    | 'assigned'
+    | 'reassigned'
+    | 'blocked_cross_locality'
+    | 'blocked_ineligible'
+    | 'no_eligible_partner';
+  reason?: string;
+  assignedBy: string;
+  timestamp: string;
+  crossLocalityApproved?: boolean;
+}
+
+export interface LocalityRoutingRule {
+  localityName: string;
+  crossLocalityEnabled: boolean;
+  nearbyLocalities: string[];
+  shopIds: string[];
+  deliveryRiderIds: string[];
+  rideDriverIds: string[];
+  serviceProviderIds: string[];
+  updatedAt?: string;
+}
+
+export interface UniversalRoutingConfig {
+  globalCrossLocalityEnabled: boolean;
+  rulesByLocality: Record<string, LocalityRoutingRule>;
+  updatedBy?: string;
+  updatedAt?: string;
+}
+
+export interface PartnerEligibilityReport {
+  partnerId: string;
+  partnerName: string;
+  partnerRole: PartnerRoleType;
+  baseLocality: string;
+  currentLocation: string;
+  isEligible: boolean;
+  reasons: string[];
+  isExactLocality: boolean;
+  isApprovedNearbyLocality: boolean;
+  crossLocalityUsed: boolean;
+  vehicleType?: VehicleType;
+  category?: string;
+}
+
+export interface RoutingAlert {
+  id: string;
+  requestId: string;
+  serviceCategory: RoutingServiceCategory;
+  requestLocality: string;
+  vehicleType?: VehicleType;
+  serviceRequired?: string;
+  message: string;
+  status: 'open' | 'resolved';
+  createdAt: string;
+  resolvedAt?: string;
+}
 

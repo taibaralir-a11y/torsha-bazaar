@@ -1,14 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { X, Plus, Minus, ShoppingBag, ArrowRight, ShieldCheck, CheckCircle2, AlertTriangle, MapPin, Check } from 'lucide-react';
 import { CartItem, Order, UserProfile, Shop, LocalityInfo } from '../types';
-import { INITIAL_SERVICE_LOCALITIES, getLocalityByName, getDistanceBetween } from '../utils/hyperlocalRouting';
+import { INITIAL_SERVICE_LOCALITIES, getLocalityByName } from '../utils/hyperlocalRouting';
+import {
+  computeCartItemLineTotal,
+  computeCartItemUnitPrice,
+  computeShopOrderPricing,
+  planSplitCartOrders
+} from '../utils/checkoutOrder';
 
 interface CartDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   cart: CartItem[];
   onUpdateQuantity: (productId: string, quantity: number) => void;
-  onPlaceOrder: (order: Order) => void;
+  onPlaceOrder: (order: Order | Order[]) => Promise<{ ok: boolean; error?: string } | void> | void;
   user: UserProfile;
   currentLocation?: string;
   shops?: Shop[];
@@ -32,28 +38,49 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   });
   const [deliveryAddress, setDeliveryAddress] = useState(user.address || '');
   const [isOrdered, setIsOrdered] = useState(false);
+  const [placedOrderCount, setPlacedOrderCount] = useState(1);
   const [approvedCrossLocality, setApprovedCrossLocality] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [checkoutError, setCheckoutError] = useState('');
 
   useEffect(() => {
     setDeliveryLocality(user.location || currentLocation?.split(',')[0].trim() || 'Satali');
     setDeliveryAddress(user.address || '');
     setIsOrdered(false);
+    setPlacedOrderCount(1);
     setApprovedCrossLocality(false);
-  }, [user.id, user.location, user.address, currentLocation]);
+    setCheckoutError('');
+  }, [user.id, user.location, user.address, currentLocation, isOpen]);
 
   if (!isOpen) return null;
 
-  const getItemUnitPrice = (item: CartItem) => {
-    if (item.selectedWeightGrams && item.product.pricePerKg) {
-      return Math.round(item.product.pricePerKg * (item.selectedWeightGrams / 1000));
-    }
-    return item.product.price;
-  };
+  const splitPlan = planSplitCartOrders({
+    cart,
+    shops,
+    customerId: user.id || '',
+    customerName: user.name || 'Customer',
+    customerPhone: user.phone || '',
+    deliveryLocality,
+    deliveryAddress: deliveryAddress.trim(),
+    paymentMethod,
+    localities
+  });
 
-  const subtotal = cart.reduce((sum, item) => sum + getItemUnitPrice(item) * item.quantity, 0);
-  const deliveryFee = subtotal > 199 || subtotal === 0 ? 0 : 25;
-  const discount = subtotal > 150 ? 15 : 0;
-  const total = Math.max(0, subtotal + deliveryFee - discount);
+  const isSplitMultiShop = splitPlan.isSplitMultiShop;
+  const plannedOrders = splitPlan.orders;
+  const fallbackPricing = computeShopOrderPricing(cart);
+  const subtotal = plannedOrders.length > 0
+    ? plannedOrders.reduce((sum, o) => sum + o.subtotal, 0)
+    : fallbackPricing.subtotal;
+  const deliveryFee = plannedOrders.length > 0
+    ? plannedOrders.reduce((sum, o) => sum + o.deliveryFee, 0)
+    : fallbackPricing.deliveryFee;
+  const discount = plannedOrders.length > 0
+    ? plannedOrders.reduce((sum, o) => sum + o.discount, 0)
+    : fallbackPricing.discount;
+  const total = plannedOrders.length > 0
+    ? plannedOrders.reduce((sum, o) => sum + o.total, 0)
+    : fallbackPricing.total;
 
   // Check for cross-locality orders
   // Requirement: "Never send an order to another locality without customer approval."
@@ -64,7 +91,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
       productName: item.product.name,
       shopId: item.product.shopId,
       shopName: shop?.name || item.product.shopName || 'Local Merchant',
-      shopLocality: shop?.locality || 'Satali'
+      shopLocality: shop?.locality || item.product.sellerLocality || deliveryLocality
     };
   });
 
@@ -73,40 +100,42 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
     return normShopLoc !== normCustomerLoc;
   });
 
+  const unavailableShopItems = cart.filter((item) => {
+    if (!item.product.shopId) return true;
+    const shop = shops.find((s) => s.id === item.product.shopId);
+    if (!shop || shop.status !== 'approved') return true;
+    if (item.product.shopStatus && item.product.shopStatus !== 'approved') return true;
+    return false;
+  });
+
+  const hasUnavailableShop = unavailableShopItems.length > 0;
   const isCrossLocality = crossLocalityList.length > 0;
-  const canProceedCheckout = !isCrossLocality || approvedCrossLocality;
+  const canProceedCheckout = !hasUnavailableShop && !isSubmitting && (!isCrossLocality || approvedCrossLocality);
 
-  const handleCheckout = () => {
-    if (cart.length === 0 || !canProceedCheckout) return;
+  const handleCheckout = async () => {
+    if (cart.length === 0 || !canProceedCheckout || isSubmitting) return;
+    setCheckoutError('');
 
-    const targetShopId = cart[0]?.product.shopId || 'shop-satali-mandi-1';
-    const targetShop = shops.find((s) => s.id === targetShopId);
+    if (splitPlan.error || plannedOrders.length === 0) {
+      setCheckoutError(splitPlan.error || 'One or more shops in your cart are unavailable.');
+      return;
+    }
 
-    const newOrder: Order = {
-      id: `TB-${Math.floor(1000 + Math.random() * 9000)}`,
-      shopId: targetShopId,
-      ...(targetShop?.ownerId ? { shopOwnerId: targetShop.ownerId } : {}),
-      shopName: targetShop?.name || cart[0]?.product.shopName || 'Maa Tara Fresh Produce',
-      customerId: user.id || '',
-      customerName: user.name || 'Customer',
-      customerPhone: user.phone || '',
-      items: [...cart],
-      subtotal,
-      deliveryFee,
-      discount,
-      total,
-      status: 'pending',
-      date: 'Today, Just Now',
-      deliveryAddress,
-      locality: deliveryLocality,
-      pincode: getLocalityByName(deliveryLocality, localities).pincode,
-      estimatedDelivery: isCrossLocality ? '40-50 mins (Cross-Locality)' : '20-30 mins (Local)',
-      paymentMethod,
-      createdAt: new Date().toISOString()
-    };
-
-    onPlaceOrder(newOrder);
-    setIsOrdered(true);
+    setIsSubmitting(true);
+    try {
+      const payload = plannedOrders.length === 1 ? plannedOrders[0] : plannedOrders;
+      const res = await onPlaceOrder(payload);
+      if (res && res.ok === false) {
+        setCheckoutError(res.error || 'Could not place your order right now. Please try again.');
+        return;
+      }
+      setPlacedOrderCount(plannedOrders.length);
+      setIsOrdered(true);
+    } catch (err: any) {
+      setCheckoutError(err?.message || 'Could not submit your order to the server.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -133,13 +162,21 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
             <div className="w-16 h-16 rounded-full bg-emerald-100 text-[#0E7438] flex items-center justify-center animate-bounce">
               <CheckCircle2 className="w-10 h-10" />
             </div>
-            <h3 className="text-xl font-black text-gray-900">Order Placed Successfully!</h3>
+            <h3 className="text-xl font-black text-gray-900">
+              {placedOrderCount > 1
+                ? `${placedOrderCount} Shop Orders Placed!`
+                : 'Order Placed Successfully!'}
+            </h3>
             <div className="bg-emerald-50 border border-emerald-200 p-3.5 rounded-2xl text-xs text-emerald-950 text-left space-y-1 w-full max-w-xs">
               <p className="font-bold flex items-center gap-1.5">
                 <MapPin className="w-3.5 h-3.5 text-emerald-700" />
                 <span>Destination: {deliveryLocality}</span>
               </p>
-              <p className="text-[11px] text-gray-600">Dispatched directly to local shopkeeper for verification.</p>
+              <p className="text-[11px] text-gray-600">
+                {placedOrderCount > 1
+                  ? 'Your multi-shop cart was split into separate per-shop orders and dispatched for verification.'
+                  : 'Dispatched directly to local shopkeeper for verification.'}
+              </p>
             </div>
             <button
               onClick={() => {
@@ -164,10 +201,11 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
             {/* Items List */}
             <div className="space-y-3">
               {cart.map((item) => {
-                const unitPrice = getItemUnitPrice(item);
+                const unitPrice = computeCartItemUnitPrice(item);
+                const lineTotal = computeCartItemLineTotal(item);
                 return (
                   <div
-                    key={item.product.id}
+                    key={`${item.product.id}-${item.selectedWeightGrams || 'std'}`}
                     className="flex items-center justify-between p-3 bg-gray-50 rounded-2xl border border-gray-100 gap-3"
                   >
                     <img
@@ -218,7 +256,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                         </button>
                       </div>
                       <span className="text-xs font-extrabold text-gray-900 w-12 text-right">
-                        ₹{unitPrice * item.quantity}
+                        ₹{lineTotal}
                       </span>
                     </div>
                   </div>
@@ -276,6 +314,18 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
               </div>
             )}
 
+            {hasUnavailableShop && (
+              <div className="bg-rose-50 border border-rose-200 rounded-2xl p-3 text-xs flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="font-bold text-rose-900">Shop Currently Suspended / Unavailable</h4>
+                  <p className="text-[11px] text-rose-800 mt-0.5">
+                    One or more shops in your cart are currently suspended or inactive. Please remove unavailable items to proceed.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Delivery Address */}
             <div className="bg-white rounded-2xl border border-gray-100 p-3.5 shadow-xs space-y-2">
               <label className="text-xs font-bold text-gray-700 block">Specific Street Address & Landmark</label>
@@ -309,6 +359,31 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
               </div>
             </div>
 
+            {/* Multi-Shop Split Summary */}
+            {isSplitMultiShop && (
+              <div className="bg-sky-50 border border-sky-200 rounded-2xl p-3.5 text-xs space-y-2">
+                <div className="flex items-center justify-between font-bold text-sky-950">
+                  <span>Multi-Shop Split Checkout</span>
+                  <span className="text-[10px] bg-sky-100 text-sky-800 px-2 py-0.5 rounded-full">
+                    {plannedOrders.length} Separate Orders
+                  </span>
+                </div>
+                <p className="text-[11px] text-sky-800">
+                  Items from different shops are cleanly split into per-shop orders for independent preparation and dispatch:
+                </p>
+                <div className="space-y-1.5">
+                  {plannedOrders.map((ord) => (
+                    <div key={ord.id} className="flex items-center justify-between bg-white px-2.5 py-1.5 rounded-xl border border-sky-100">
+                      <span className="font-semibold text-gray-800 truncate pr-2">
+                        {ord.shopName} ({ord.items.reduce((s, i) => s + i.quantity, 0)} items)
+                      </span>
+                      <span className="font-bold text-gray-900 shrink-0">₹{ord.total}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Bill Summary */}
             <div className="bg-white rounded-2xl border border-gray-100 p-3.5 shadow-xs text-xs space-y-1.5">
               <div className="flex justify-between text-gray-600">
@@ -316,7 +391,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                 <span>₹{subtotal}</span>
               </div>
               <div className="flex justify-between text-gray-600">
-                <span>Delivery Fee</span>
+                <span>Delivery Fee {isSplitMultiShop ? `(${plannedOrders.length} shops)` : ''}</span>
                 <span>{deliveryFee === 0 ? <span className="text-emerald-700 font-bold">FREE</span> : `₹${deliveryFee}`}</span>
               </div>
               {discount > 0 && (
@@ -335,7 +410,13 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
 
         {/* Footer Checkout Action */}
         {!isOrdered && cart.length > 0 && (
-          <div className="p-4 border-t border-gray-100 bg-white">
+          <div className="p-4 border-t border-gray-100 bg-white space-y-2.5">
+            {checkoutError && (
+              <div className="bg-rose-50 border border-rose-200 rounded-xl p-2.5 text-xs text-rose-800 font-semibold flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <span>{checkoutError}</span>
+              </div>
+            )}
             <button
               onClick={handleCheckout}
               disabled={!canProceedCheckout}
@@ -346,9 +427,13 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
               }`}
             >
               <span>
-                {isCrossLocality && !approvedCrossLocality
-                  ? 'Approval Required for Cross-Locality'
-                  : `Place Order (${paymentMethod})`}
+                {isSubmitting
+                  ? 'Placing Order...'
+                  : hasUnavailableShop
+                    ? 'Shop Unavailable — Remove Items'
+                    : isCrossLocality && !approvedCrossLocality
+                      ? 'Approval Required for Cross-Locality'
+                      : `Place Order (${paymentMethod})`}
               </span>
               <span className="flex items-center gap-1 font-black text-yellow-300">
                 ₹{total} <ArrowRight className="w-4 h-4 text-white" />

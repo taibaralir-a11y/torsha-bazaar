@@ -834,14 +834,14 @@ export const AccountView: React.FC<AccountViewProps> = ({
                     <div key={c.id} className="bg-white p-3.5 rounded-2xl border border-gray-100 shadow-xs space-y-1.5">
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-bold text-gray-900 capitalize">
-                          {c.type || 'Issue'}: {c.targetName || c.subject || 'Complaint'}
+                          {c.type === 'return_request' ? 'Return Request' : c.type || 'Issue'}: {c.targetName || c.subject || 'Complaint'}
                         </span>
                         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${
                           c.status === 'resolved'
                             ? 'bg-emerald-100 text-emerald-800'
                             : 'bg-amber-100 text-amber-800'
                         }`}>
-                          {c.status}
+                          {c.type === 'return_request' && c.returnStatus ? c.returnStatus.replace('_', ' ') : c.status}
                         </span>
                       </div>
                       <p className="text-xs text-gray-600 bg-gray-50 p-2 rounded-lg">{c.description}</p>

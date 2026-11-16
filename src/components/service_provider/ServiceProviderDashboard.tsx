@@ -12,28 +12,53 @@ import {
   User,
   Star,
   Calendar,
-  Briefcase
+  Briefcase,
+  LogOut
 } from 'lucide-react';
-import { ServiceProvider, ServiceRequest, ServiceRequestStatus, ServiceCategoryType, ShopApprovalStatus } from '../../types';
+import {
+  PartnerAccount,
+  ServiceProvider,
+  ServiceRequest,
+  ServiceRequestStatus,
+  ServiceCategoryType,
+  ShopApprovalStatus,
+  UniversalRoutingConfig
+} from '../../types';
+import {
+  evaluateServiceProviderEligibility,
+  normalizeServiceCategory
+} from '../../utils/hyperlocalRouting';
+
+interface ServiceActionResult {
+  ok: boolean;
+  backendRequired?: boolean;
+  error?: string;
+}
 
 interface ServiceProviderDashboardProps {
   provider: ServiceProvider;
   isAdmin?: boolean;
   serviceRequests: ServiceRequest[];
+  routingConfig?: UniversalRoutingConfig;
+  partnerAccounts?: PartnerAccount[];
   onSwitchPortal: () => void;
   onUpdateProvider: (updated: Partial<ServiceProvider>) => void;
-  onUpdateServiceStatus: (requestId: string, status: ServiceRequestStatus) => void;
-  onAcceptRequest: (requestId: string, providerId: string, providerName: string) => void;
+  onUpdateServiceStatus: (requestId: string, status: ServiceRequestStatus) => Promise<ServiceActionResult | void> | void;
+  onAcceptRequest: (requestId: string, providerId: string, providerName: string) => Promise<ServiceActionResult | void> | void;
+  onLogout?: () => void;
 }
 
 export const ServiceProviderDashboard: React.FC<ServiceProviderDashboardProps> = ({
   provider,
   isAdmin = false,
   serviceRequests,
+  routingConfig,
+  partnerAccounts = [],
   onSwitchPortal,
   onUpdateProvider,
   onUpdateServiceStatus,
   onAcceptRequest,
+  onLogout,
 }) => {
   const [activeTab, setActiveTab] = useState<'requests' | 'active' | 'history' | 'profile'>('requests');
   const [showEditModal, setShowEditModal] = useState(false);
@@ -44,11 +69,31 @@ export const ServiceProviderDashboard: React.FC<ServiceProviderDashboardProps> =
   const [editHourlyRate, setEditHourlyRate] = useState(provider.hourlyRate);
   const [editExperience, setEditExperience] = useState(provider.experienceYears);
   const [editDesc, setEditDesc] = useState(provider.description);
+  const [actionNotice, setActionNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [confirmCancelJobId, setConfirmCancelJobId] = useState<string | null>(null);
 
-  // Incoming booking requests matching category or general
-  const incomingRequests = serviceRequests.filter(
-    (r) => (r.status === 'requested') && (r.category === provider.category || !r.providerId)
-  );
+  // Incoming booking requests strictly filtered by Admin locality routing & service category
+  const incomingRequests = serviceRequests.filter((r) => {
+    if (r.status !== 'requested') return false;
+    if (r.providerId && r.providerId !== provider.id) return false;
+    if (r.providerId === provider.id) return true;
+    const reqLoc = r.locality || r.address;
+    if (routingConfig) {
+      return evaluateServiceProviderEligibility(
+        reqLoc,
+        r.category,
+        provider,
+        routingConfig,
+        partnerAccounts
+      ).isEligible;
+    }
+    return (
+      provider.status === 'approved' &&
+      provider.isAvailable &&
+      normalizeServiceCategory(r.category) === normalizeServiceCategory(provider.category)
+    );
+  });
 
   // Active accepted jobs
   const activeJobs = serviceRequests.filter(
@@ -116,18 +161,30 @@ export const ServiceProviderDashboard: React.FC<ServiceProviderDashboardProps> =
             </div>
           </div>
 
-          {/* Availability Toggle */}
-          <button
-            onClick={() => onUpdateProvider({ isAvailable: !provider.isAvailable })}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm ${
-              provider.isAvailable
-                ? 'bg-emerald-500 text-white shadow-emerald-900/40 ring-2 ring-emerald-300'
-                : 'bg-slate-700 text-slate-300'
-            }`}
-          >
-            <Power className="w-3.5 h-3.5" />
-            {provider.isAvailable ? 'AVAILABLE' : 'BUSY'}
-          </button>
+          <div className="flex items-center gap-1.5">
+            {/* Availability Toggle */}
+            <button
+              onClick={() => onUpdateProvider({ isAvailable: !provider.isAvailable })}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm ${
+                provider.isAvailable
+                  ? 'bg-emerald-500 text-white shadow-emerald-900/40 ring-2 ring-emerald-300'
+                  : 'bg-slate-700 text-slate-300'
+              }`}
+            >
+              <Power className="w-3.5 h-3.5" />
+              {provider.isAvailable ? 'AVAILABLE' : 'BUSY'}
+            </button>
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                title="Sign Out"
+                className="p-1.5 bg-rose-700/80 hover:bg-rose-700 text-white rounded-lg transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Badge Card */}
@@ -228,6 +285,27 @@ export const ServiceProviderDashboard: React.FC<ServiceProviderDashboardProps> =
 
       {/* Content */}
       <div className="p-4 space-y-4 flex-1">
+        {actionNotice && (
+          <div
+            className={`rounded-2xl p-3 text-xs font-semibold flex items-start justify-between gap-2 border ${
+              actionNotice.type === 'err'
+                ? 'bg-rose-50 border-rose-200 text-rose-900'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{actionNotice.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionNotice(null)}
+              className="font-bold opacity-70 hover:opacity-100"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {/* TAB 1: INCOMING REQUESTS */}
         {activeTab === 'requests' && (
           <div className="space-y-3">
@@ -280,11 +358,25 @@ export const ServiceProviderDashboard: React.FC<ServiceProviderDashboardProps> =
                   </div>
 
                   <button
-                    disabled={!isApproved || !provider.isAvailable || !isAdmin}
-                    onClick={() => {
+                    type="button"
+                    disabled={!isApproved || !provider.isAvailable || !isAdmin || isBusy}
+                    onClick={async () => {
                       if (!isAdmin) return;
-                      onAcceptRequest(req.id, provider.id, provider.name);
-                      setActiveTab('active');
+                      setActionNotice(null);
+                      setIsBusy(true);
+                      try {
+                        const res = await onAcceptRequest(req.id, provider.id, provider.name);
+                        if (res && res.ok === false) {
+                          setActionNotice({
+                            type: 'err',
+                            text: res.error || 'Could not accept service request.'
+                          });
+                          return;
+                        }
+                        setActiveTab('active');
+                      } finally {
+                        setIsBusy(false);
+                      }
                     }}
                     className="w-full py-2.5 bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 disabled:text-gray-600 text-white font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm"
                   >
@@ -350,8 +442,19 @@ export const ServiceProviderDashboard: React.FC<ServiceProviderDashboardProps> =
                   <div className="space-y-2 pt-2">
                     <div className="grid grid-cols-2 gap-2">
                       <button
-                        onClick={() => onUpdateServiceStatus(job.id, 'in_progress')}
-                        className={`p-2.5 rounded-xl text-xs font-bold border transition-all ${
+                        type="button"
+                        disabled={isBusy}
+                        onClick={async () => {
+                          setActionNotice(null);
+                          setIsBusy(true);
+                          try {
+                            const res = await onUpdateServiceStatus(job.id, 'in_progress');
+                            if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not update status.' });
+                          } finally {
+                            setIsBusy(false);
+                          }
+                        }}
+                        className={`p-2.5 rounded-xl text-xs font-bold border transition-all disabled:opacity-50 ${
                           job.status === 'in_progress'
                             ? 'bg-blue-600 text-white border-blue-700'
                             : 'bg-white text-gray-700 border-gray-200'
@@ -361,24 +464,69 @@ export const ServiceProviderDashboard: React.FC<ServiceProviderDashboardProps> =
                       </button>
 
                       <button
-                        onClick={() => onUpdateServiceStatus(job.id, 'completed')}
-                        className="p-2.5 rounded-xl text-xs font-bold bg-emerald-600 text-white border border-emerald-700 shadow-sm"
+                        type="button"
+                        disabled={isBusy}
+                        onClick={async () => {
+                          setActionNotice(null);
+                          setIsBusy(true);
+                          try {
+                            const res = await onUpdateServiceStatus(job.id, 'completed');
+                            if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not complete job.' });
+                          } finally {
+                            setIsBusy(false);
+                          }
+                        }}
+                        className="p-2.5 rounded-xl text-xs font-bold bg-emerald-600 text-white border border-emerald-700 shadow-sm disabled:opacity-50"
                       >
                         ✓ Job Completed
                       </button>
                     </div>
 
-                    <button
-                      onClick={() => {
-                        if (confirm('Cancel this job?')) {
-                          onUpdateServiceStatus(job.id, 'cancelled');
-                        }
-                      }}
-                      className="w-full py-2 bg-red-50 hover:bg-red-100 text-red-600 font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5"
-                    >
-                      <XCircle className="w-3.5 h-3.5" />
-                      Cancel Job
-                    </button>
+                    {confirmCancelJobId === job.id ? (
+                      <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs space-y-2">
+                        <p className="font-bold text-red-900">Cancel this service job?</p>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={async () => {
+                              setActionNotice(null);
+                              setIsBusy(true);
+                              try {
+                                const res = await onUpdateServiceStatus(job.id, 'cancelled');
+                                if (res && res.ok === false) {
+                                  setActionNotice({ type: 'err', text: res.error || 'Could not cancel job.' });
+                                  return;
+                                }
+                                setConfirmCancelJobId(null);
+                              } finally {
+                                setIsBusy(false);
+                              }
+                            }}
+                            className="flex-1 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold rounded-lg"
+                          >
+                            {isBusy ? 'Cancelling...' : 'Yes, Cancel Job'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => setConfirmCancelJobId(null)}
+                            className="flex-1 py-2 bg-white border border-gray-200 text-gray-700 font-bold rounded-lg"
+                          >
+                            Keep Job
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmCancelJobId(job.id)}
+                        className="w-full py-2 bg-red-50 hover:bg-red-100 text-red-600 font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <XCircle className="w-3.5 h-3.5" />
+                        Cancel Job
+                      </button>
+                    )}
                   </div>
                 </div>
               ))

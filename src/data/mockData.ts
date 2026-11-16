@@ -1317,11 +1317,26 @@ export const INITIAL_DRIVERS: Driver[] = [
     vehicleType: 'taxi',
     vehicleNumber: 'WB-74-T-4521',
     locality: 'Jaigaon',
+    currentLocation: 'Jaigaon',
     status: 'approved',
     isOnline: true,
     totalRides: 95,
     rating: 5.0,
     createdAt: '2026-10-08T10:00:00Z'
+  },
+  {
+    id: 'drv-sanjay-satali-4',
+    name: 'Sanjay Oraon (Toto #12)',
+    phone: '+91 98324 77120',
+    vehicleType: 'toto',
+    vehicleNumber: 'WB-72-E-4410',
+    locality: 'Satali',
+    currentLocation: 'Satali',
+    status: 'approved',
+    isOnline: true,
+    totalRides: 76,
+    rating: 4.8,
+    createdAt: '2026-10-12T08:00:00Z'
   }
 ];
 
@@ -1482,9 +1497,36 @@ export const INITIAL_DELIVERY_PERSONS: DeliveryPerson[] = [
     status: 'approved',
     isOnline: true,
     locality: 'Hasimara',
+    currentLocation: 'Hasimara',
     totalDelivered: 84,
     rating: 4.8,
     createdAt: '2026-10-08T09:00:00Z'
+  },
+  {
+    id: 'del-prakash-3',
+    name: 'Prakash Lohar',
+    phone: '+91 98321 66104',
+    email: 'prakash.satali@gmail.com',
+    status: 'approved',
+    isOnline: true,
+    locality: 'Satali',
+    currentLocation: 'Satali',
+    totalDelivered: 54,
+    rating: 4.8,
+    createdAt: '2026-10-14T09:00:00Z'
+  },
+  {
+    id: 'del-dipak-4',
+    name: 'Dipak Tamang',
+    phone: '+91 94348 22019',
+    email: 'dipak.jaigaon@gmail.com',
+    status: 'approved',
+    isOnline: true,
+    locality: 'Jaigaon',
+    currentLocation: 'Jaigaon',
+    totalDelivered: 91,
+    rating: 4.9,
+    createdAt: '2026-10-16T09:00:00Z'
   }
 ];
 
@@ -1840,4 +1882,5 @@ export const NEARBY_HOSPITALS: NearbyHospital[] = [
     type: 'Government BPHC / RH'
   }
 ];
+
 

@@ -10,10 +10,11 @@ import {
   Briefcase, 
   Check, 
   ArrowRight,
-  ShieldCheck,
-  Stethoscope
+  Stethoscope,
+  KeyRound,
+  LogOut
 } from 'lucide-react';
-import { PortalMode } from '../../types';
+import { PartnerAccount, PortalMode } from '../../types';
 
 interface PortalSwitcherModalProps {
   isOpen: boolean;
@@ -22,6 +23,9 @@ interface PortalSwitcherModalProps {
   onSelectMode: (mode: PortalMode) => void;
   userEmail?: string | null;
   isAdmin?: boolean;
+  partnerAccount?: PartnerAccount | null;
+  onOpenPartnerLogin?: () => void;
+  onLogout?: () => void;
 }
 
 export const PortalSwitcherModal: React.FC<PortalSwitcherModalProps> = ({
@@ -30,13 +34,22 @@ export const PortalSwitcherModal: React.FC<PortalSwitcherModalProps> = ({
   currentMode,
   onSelectMode,
   userEmail,
-  isAdmin = false
+  isAdmin = false,
+  partnerAccount = null,
+  onOpenPartnerLogin,
+  onLogout
 }) => {
   if (!isOpen) return null;
 
-  const displaySessionLabel = userEmail && userEmail.trim()
-    ? `Logged in as ${userEmail}`
-    : 'Guest Session';
+  const hasActivePartnerRole = Boolean(partnerAccount && partnerAccount.status === 'active');
+
+  const displaySessionLabel = isAdmin
+    ? `Super Admin: ${userEmail || 'Verified'}`
+    : hasActivePartnerRole && partnerAccount
+      ? `Partner (${partnerAccount.role.replace('_', ' ').toUpperCase()}): ${partnerAccount.loginEmail}`
+      : userEmail && userEmail.trim()
+        ? `Customer Session: ${userEmail}`
+        : 'Guest / Customer Session';
 
   const allPortals = [
     {
@@ -58,7 +71,7 @@ export const PortalSwitcherModal: React.FC<PortalSwitcherModalProps> = ({
     {
       id: 'admin' as PortalMode,
       title: 'Super Admin Dashboard',
-      desc: 'Approve shops, verify drivers & technicians, monitor all orders, resolve complaints & view metrics',
+      desc: 'Approve shops, verify drivers & technicians, issue role accounts & monitor platform operations',
       icon: ShieldAlert,
       color: 'text-purple-700 bg-purple-50 border-purple-200',
       badge: 'Authorized Admin'
@@ -98,7 +111,7 @@ export const PortalSwitcherModal: React.FC<PortalSwitcherModalProps> = ({
     {
       id: 'doctor' as PortalMode,
       title: 'Doctor Partner Portal',
-      desc: 'Registered MBBS & Specialists portal: emergency home visits, consultation fees & schedule',
+      desc: 'Verified MBBS & Specialists portal: emergency home visits, consultation fees & schedule',
       icon: Stethoscope,
       color: 'text-rose-700 bg-rose-50 border-rose-200',
       badge: 'Healthcare'
@@ -106,26 +119,34 @@ export const PortalSwitcherModal: React.FC<PortalSwitcherModalProps> = ({
     {
       id: 'kabari' as PortalMode,
       title: 'Kabari & Scrap Buyer Portal',
-      desc: 'Review local scrap selling requests, view photos, submit purchase quotes (₹/kg) and schedule pickups',
+      desc: 'Review local scrap selling requests, submit purchase quotes (₹/kg) and schedule pickups',
       icon: Truck,
       color: 'text-lime-700 bg-lime-50 border-lime-300',
       badge: 'Recycler'
     }
   ];
 
-  const portals = allPortals.filter((p) => p.id !== 'admin' || isAdmin);
+  // Strict Role Isolation:
+  // - Admin sees all portals
+  // - Active Partner sees Customer view + strictly their assigned role portal
+  // - Customer / Guest sees Customer view only (partner portals require Admin-issued login)
+  const portals = isAdmin
+    ? allPortals
+    : hasActivePartnerRole && partnerAccount
+      ? allPortals.filter((p) => p.id === 'customer' || p.id === partnerAccount.role)
+      : allPortals.filter((p) => p.id === 'customer');
 
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
       <div className="bg-white rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl animate-in zoom-in-95 duration-200 my-8">
         <div className="flex items-center justify-between pb-2 border-b border-gray-100">
-          <div>
-            <h3 className="text-base font-bold text-gray-900">Switch Application Role</h3>
-            <p className="text-[11px] text-gray-500">{displaySessionLabel}</p>
+          <div className="min-w-0 pr-2">
+            <h3 className="text-base font-bold text-gray-900">Portal Access & Role Switcher</h3>
+            <p className="text-[11px] text-gray-500 truncate">{displaySessionLabel}</p>
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded-full hover:bg-gray-100 text-gray-500"
+            className="p-1 rounded-full hover:bg-gray-100 text-gray-500 shrink-0"
             aria-label="Close"
           >
             <X className="w-5 h-5" />
@@ -181,6 +202,46 @@ export const PortalSwitcherModal: React.FC<PortalSwitcherModalProps> = ({
               </button>
             );
           })}
+
+          {!isAdmin && onOpenPartnerLogin && (
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenPartnerLogin();
+              }}
+              className="w-full text-left p-3.5 rounded-2xl border border-slate-200 bg-slate-50 hover:bg-slate-100 transition-all flex items-center justify-between gap-3"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-slate-900 text-emerald-300 flex items-center justify-center shrink-0">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-xs sm:text-sm font-bold text-slate-900">
+                    {hasActivePartnerRole ? 'Switch Partner Credentials' : 'Authorized Partner Sign In'}
+                  </h4>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Sign in with Admin-issued email/mobile & password for Shopkeeper, Rider, Driver, Doctor or Business Partner.
+                  </p>
+                </div>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
+            </button>
+          )}
+
+          {hasActivePartnerRole && !isAdmin && onLogout && (
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onLogout();
+              }}
+              className="w-full p-3 rounded-2xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs flex items-center justify-center gap-2 transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Sign Out of Partner Session</span>
+            </button>
+          )}
         </div>
       </div>
     </div>

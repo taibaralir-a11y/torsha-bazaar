@@ -1,17 +1,35 @@
-import React, { useState } from 'react';
-import { ArrowLeft, Package, MapPin, Truck, CheckCircle2, Clock } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { ArrowLeft, Package, MapPin, Truck, CheckCircle2, Clock, AlertTriangle } from 'lucide-react';
 import { LOCATIONS } from '../data/mockData';
+import {
+  DeliveryPerson,
+  LocalityInfo,
+  PartnerAccount,
+  UniversalRoutingConfig
+} from '../types';
+import {
+  evaluateDeliveryRiderEligibility,
+  resolveAreaKey
+} from '../utils/hyperlocalRouting';
 
 interface DeliveryViewProps {
   onBackToHome: () => void;
   currentLocation: string;
   onRequestDelivery?: (req: any) => void;
+  deliveryPersons?: DeliveryPerson[];
+  routingConfig?: UniversalRoutingConfig;
+  partnerAccounts?: PartnerAccount[];
+  localities?: LocalityInfo[];
 }
 
 export const DeliveryView: React.FC<DeliveryViewProps> = ({ 
   onBackToHome, 
   currentLocation,
-  onRequestDelivery
+  onRequestDelivery,
+  deliveryPersons = [],
+  routingConfig,
+  partnerAccounts = [],
+  localities
 }) => {
   const [senderName, setSenderName] = useState('');
   const [senderPhone, setSenderPhone] = useState('');
@@ -25,6 +43,30 @@ export const DeliveryView: React.FC<DeliveryViewProps> = ({
 
   const packageOptions = ['Documents & Files', 'Food / Home Tiffin', 'Medicines', 'Electronics / Spare Parts', 'Clothes / Gifts'];
   const weightOptions = ['Under 1 kg (₹35)', '1 - 3 kg (₹55)', '3 - 5 kg (₹85)', '5 - 10 kg (₹130)'];
+
+  const pickupArea = resolveAreaKey(pickupAddress, localities);
+  const dropArea = resolveAreaKey(dropAddress, localities);
+
+  const eligibleLocalRiders = useMemo(() => {
+    if (!routingConfig) {
+      return deliveryPersons.filter(
+        (d) =>
+          d.status === 'approved' &&
+          d.isOnline &&
+          resolveAreaKey(d.currentLocation || d.locality, localities) === pickupArea
+      );
+    }
+    return deliveryPersons.filter(
+      (d) =>
+        evaluateDeliveryRiderEligibility(
+          pickupArea,
+          d,
+          routingConfig,
+          partnerAccounts,
+          localities
+        ).isEligible
+    );
+  }, [deliveryPersons, routingConfig, partnerAccounts, localities, pickupArea]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -41,13 +83,16 @@ export const DeliveryView: React.FC<DeliveryViewProps> = ({
         senderName,
         senderPhone,
         senderAddress: pickupAddress,
+        pickupLocality: pickupArea,
         receiverName,
         receiverPhone,
         receiverAddress: dropAddress,
+        dropLocality: dropArea,
         parcelDescription: packageType,
         weightCategory: packageWeight,
         estimatedPrice: price,
         status: 'pending_assignment',
+        routingStatus: eligibleLocalRiders.length > 0 ? 'pending_admin_routing' : 'unavailable_in_locality',
         createdAt: new Date().toISOString()
       });
     }
@@ -77,13 +122,33 @@ export const DeliveryView: React.FC<DeliveryViewProps> = ({
       <div className="p-4 space-y-4">
         {isBooked ? (
           <div className="bg-white rounded-2xl border border-emerald-200 p-5 shadow-sm space-y-4 text-center">
-            <div className="w-14 h-14 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center mx-auto">
-              <CheckCircle2 className="w-8 h-8" />
+            <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto ${
+              eligibleLocalRiders.length > 0
+                ? 'bg-emerald-100 text-emerald-700'
+                : 'bg-amber-100 text-amber-700'
+            }`}>
+              {eligibleLocalRiders.length > 0 ? (
+                <Clock className="w-8 h-8" />
+              ) : (
+                <AlertTriangle className="w-8 h-8" />
+              )}
             </div>
             <div>
-              <h3 className="text-lg font-bold text-gray-900">Delivery Request Dispatched!</h3>
+              <h3 className="text-lg font-bold text-gray-900">
+                {eligibleLocalRiders.length > 0
+                  ? 'Delivery Request Submitted — Pending Local Rider Assignment'
+                  : 'Request Kept Pending — Admin Notified'}
+              </h3>
               <p className="text-xs text-gray-600 mt-1">
-                A nearby Torsa delivery partner has been assigned to pick up your package from <span className="font-semibold text-gray-800">{pickupAddress}</span> within 20 minutes.
+                {eligibleLocalRiders.length > 0 ? (
+                  <>
+                    Your parcel pickup from <span className="font-semibold text-gray-800">{pickupArea}</span> is queued for Admin-approved local delivery riders ({eligibleLocalRiders.length} active in {pickupArea}). You will see rider details once accepted.
+                  </>
+                ) : (
+                  <>
+                    No eligible delivery rider is currently online in <span className="font-semibold text-gray-800">{pickupArea}</span>. Per locality routing policy, your request is NOT sent to a distant town; Admin has been notified to assign a rider.
+                  </>
+                )}
               </p>
             </div>
 

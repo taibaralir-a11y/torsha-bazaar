@@ -31,12 +31,33 @@ export const ShopStatsOverview: React.FC<ShopStatsOverviewProps> = ({
     o.status === 'confirmed' || o.status === 'preparing' || o.status === 'ready_for_dispatch' || o.status === 'out_for_delivery'
   );
   const completedOrders = shopOrders.filter((o) => o.status === 'delivered');
+  const pendingReturnOrders = shopOrders.filter((o) => o.returnRequest?.status === 'pending_review');
   const totalRevenue = completedOrders.reduce((sum, o) => sum + o.total, 0) + (shop.totalRevenue || 0);
 
   const inStockProducts = products.filter((p) => p.inStock !== false);
 
   return (
     <div className="space-y-4">
+      {pendingReturnOrders.length > 0 && (
+        <button
+          type="button"
+          onClick={() => onNavigateToTab('orders')}
+          className="w-full text-left bg-amber-50 border border-amber-300 rounded-2xl p-3.5 text-xs text-amber-950 shadow-xs flex items-center justify-between hover:bg-amber-100/70 transition-colors"
+        >
+          <div className="flex items-center gap-2.5">
+            <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+            <div>
+              <span className="font-bold block">
+                {pendingReturnOrders.length} Customer Return Request{pendingReturnOrders.length > 1 ? 's' : ''} Pending Review
+              </span>
+              <span className="text-[11px] text-amber-800">
+                Inspect customer reason & photo evidence in Live Orders or History.
+              </span>
+            </div>
+          </div>
+          <ArrowRight className="w-4 h-4 text-amber-700 shrink-0" />
+        </button>
+      )}
       {/* Shop Status Banner */}
       {shop.status === 'pending' && (
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-900 shadow-xs flex items-start gap-3">

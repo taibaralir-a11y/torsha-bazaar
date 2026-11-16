@@ -29,17 +29,23 @@ import {
 } from '../../types';
 import { PWAInstallButton } from '../common/PWAInstallButton';
 
+interface DoctorActionResult {
+  ok: boolean;
+  backendRequired?: boolean;
+  error?: string;
+}
+
 interface DoctorDashboardProps {
   doctor: Doctor;
   isAdmin?: boolean;
   onUpdateDoctor: (updated: Doctor) => void;
   requests: EmergencyDoctorRequest[];
   onUpdateRequestStatus: (
-    requestId: string, 
-    status: EmergencyDoctorStatus, 
-    etaMinutes?: number, 
+    requestId: string,
+    status: EmergencyDoctorStatus,
+    etaMinutes?: number,
     notes?: string
-  ) => void;
+  ) => Promise<DoctorActionResult | void> | void;
   onSwitchPortal: () => void;
   onLogout?: () => void;
   localities?: LocalityInfo[];
@@ -59,6 +65,9 @@ export const DoctorDashboard: React.FC<DoctorDashboardProps> = ({
   const [etaInput, setEtaInput] = useState<{ [key: string]: string }>({});
   const [notesInput, setNotesInput] = useState<{ [key: string]: string }>({});
   const [filterPriority, setFilterPriority] = useState<string>('all');
+  const [actionNotice, setActionNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [profileSavedNotice, setProfileSavedNotice] = useState<string | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
 
   const isApproved = doctor.status === 'approved';
   const isPending = doctor.status === 'pending';
@@ -101,22 +110,44 @@ export const DoctorDashboard: React.FC<DoctorDashboardProps> = ({
     });
   };
 
+  const runStatusUpdate = async (
+    requestId: string,
+    status: EmergencyDoctorStatus,
+    eta?: number,
+    notes?: string
+  ) => {
+    if (isBusy) return;
+    setActionNotice(null);
+    setIsBusy(true);
+    try {
+      const res = await onUpdateRequestStatus(requestId, status, eta, notes);
+      if (res && res.ok === false) {
+        setActionNotice({
+          type: 'err',
+          text: res.error || 'Could not update emergency consultation status.'
+        });
+      }
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   const handleAccept = (req: EmergencyDoctorRequest) => {
     const eta = parseInt(etaInput[req.id] || '20', 10);
-    onUpdateRequestStatus(req.id, 'accepted', eta, 'Doctor confirmed consultation/home visit');
+    runStatusUpdate(req.id, 'accepted', eta, 'Doctor confirmed consultation/home visit');
   };
 
   const handleStartJourney = (reqId: string) => {
-    onUpdateRequestStatus(reqId, 'doctor_on_the_way', undefined, 'Doctor is traveling to patient address');
+    runStatusUpdate(reqId, 'doctor_on_the_way', undefined, 'Doctor is traveling to patient address');
   };
 
   const handleComplete = (reqId: string) => {
     const note = notesInput[reqId] || 'Consultation completed. Patient advised proper care.';
-    onUpdateRequestStatus(reqId, 'completed', undefined, note);
+    runStatusUpdate(reqId, 'completed', undefined, note);
   };
 
   const handleDecline = (reqId: string) => {
-    onUpdateRequestStatus(reqId, 'cancelled', undefined, 'Doctor unavailable for this request');
+    runStatusUpdate(reqId, 'cancelled', undefined, 'Doctor unavailable for this request');
   };
 
   return (
@@ -208,6 +239,27 @@ export const DoctorDashboard: React.FC<DoctorDashboardProps> = ({
 
       {/* Main Content Area */}
       <main className="max-w-6xl mx-auto px-4 py-5 space-y-5">
+        {actionNotice && (
+          <div
+            className={`rounded-xl p-3 text-xs font-semibold flex items-start justify-between gap-2 border ${
+              actionNotice.type === 'err'
+                ? 'bg-rose-50 border-rose-200 text-rose-900'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{actionNotice.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionNotice(null)}
+              className="font-bold opacity-70 hover:opacity-100"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {/* Metric Cards */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
@@ -698,12 +750,14 @@ export const DoctorDashboard: React.FC<DoctorDashboardProps> = ({
                 </div>
               </div>
 
-              <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+              <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-3">
                 <span className="text-emerald-700 font-semibold flex items-center gap-1">
-                  <CheckCircle2 className="w-4 h-4" /> Changes saved to local & database
+                  <CheckCircle2 className="w-4 h-4" />{' '}
+                  {profileSavedNotice || 'Changes synced to local & database'}
                 </span>
                 <button
-                  onClick={() => alert('Doctor profile settings saved successfully.')}
+                  type="button"
+                  onClick={() => setProfileSavedNotice('Doctor profile settings saved successfully.')}
                   className="px-4 py-2 bg-slate-900 text-white rounded-lg text-xs font-semibold hover:bg-slate-800 transition-colors"
                 >
                   Save Profile

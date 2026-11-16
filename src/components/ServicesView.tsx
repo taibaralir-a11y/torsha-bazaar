@@ -1,6 +1,31 @@
-import React, { useState } from 'react';
-import { ArrowLeft, Wrench, Calendar, Clock, MapPin, CheckCircle2, ShieldCheck } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import {
+  ArrowLeft,
+  Wrench,
+  Calendar,
+  Clock,
+  MapPin,
+  CheckCircle2,
+  ShieldCheck,
+  Zap,
+  Droplets,
+  Hammer,
+  Wind,
+  Monitor,
+  Sparkles,
+  AlertTriangle
+} from 'lucide-react';
 import { LOCAL_SERVICES } from '../data/mockData';
+import {
+  LocalityInfo,
+  PartnerAccount,
+  ServiceProvider,
+  UniversalRoutingConfig
+} from '../types';
+import {
+  evaluateServiceProviderEligibility,
+  resolveAreaKey
+} from '../utils/hyperlocalRouting';
 
 interface ServicesViewProps {
   onBackToHome: () => void;
@@ -8,6 +33,10 @@ interface ServicesViewProps {
   onRequestService?: (req: any) => void;
   customerName?: string;
   customerPhone?: string;
+  serviceProviders?: ServiceProvider[];
+  routingConfig?: UniversalRoutingConfig;
+  partnerAccounts?: PartnerAccount[];
+  localities?: LocalityInfo[];
 }
 
 export const ServicesView: React.FC<ServicesViewProps> = ({ 
@@ -15,13 +44,54 @@ export const ServicesView: React.FC<ServicesViewProps> = ({
   currentLocation,
   onRequestService,
   customerName = '',
-  customerPhone = ''
+  customerPhone = '',
+  serviceProviders = [],
+  routingConfig,
+  partnerAccounts = [],
+  localities
 }) => {
   const [selectedService, setSelectedService] = useState(LOCAL_SERVICES[0]);
   const [bookingDate, setBookingDate] = useState('Today (Within 2 Hours)');
   const [address, setAddress] = useState(currentLocation);
   const [phone, setPhone] = useState(customerPhone);
   const [serviceBooked, setServiceBooked] = useState(false);
+
+  const renderServiceIcon = (iconName: string) => {
+    switch (iconName) {
+      case 'Zap':
+        return <Zap className="w-5 h-5 text-amber-600" />;
+      case 'Droplets':
+        return <Droplets className="w-5 h-5 text-blue-600" />;
+      case 'Hammer':
+        return <Hammer className="w-5 h-5 text-orange-700" />;
+      case 'Wind':
+        return <Wind className="w-5 h-5 text-cyan-600" />;
+      case 'Monitor':
+        return <Monitor className="w-5 h-5 text-indigo-600" />;
+      case 'Sparkles':
+        return <Sparkles className="w-5 h-5 text-emerald-600" />;
+      default:
+        return <Wrench className="w-5 h-5 text-teal-600" />;
+    }
+  };
+
+  const requestArea = resolveAreaKey(address || currentLocation, localities);
+  const eligibleProviders = useMemo(() => {
+    if (!routingConfig) {
+      return serviceProviders.filter((sp) => sp.status === 'approved' && sp.isAvailable);
+    }
+    return serviceProviders.filter(
+      (sp) =>
+        evaluateServiceProviderEligibility(
+          requestArea,
+          selectedService.name,
+          sp,
+          routingConfig,
+          partnerAccounts,
+          localities
+        ).isEligible
+    );
+  }, [serviceProviders, routingConfig, requestArea, selectedService.name, partnerAccounts, localities]);
 
   const timeSlots = [
     'Today (Within 2 Hours)',
@@ -41,11 +111,13 @@ export const ServicesView: React.FC<ServicesViewProps> = ({
         customerPhone: phone || customerPhone,
         category: selectedService.name,
         address,
+        locality: requestArea,
         preferredDate: bookingDate.includes('Today') ? 'Today' : 'Tomorrow',
         preferredTime: bookingDate,
         issueDescription: `Service request for ${selectedService.name} (${selectedService.popularFor})`,
         estimatedFee: selectedService.startingPrice,
         status: 'requested',
+        routingStatus: eligibleProviders.length > 0 ? 'pending_admin_routing' : 'unavailable_in_locality',
         createdAt: new Date().toISOString()
       });
     }
@@ -75,13 +147,33 @@ export const ServicesView: React.FC<ServicesViewProps> = ({
       <div className="p-4 space-y-4">
         {serviceBooked ? (
           <div className="bg-white rounded-2xl border border-emerald-200 p-5 shadow-sm space-y-4 text-center">
-            <div className="w-14 h-14 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center mx-auto">
-              <CheckCircle2 className="w-8 h-8" />
+            <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto ${
+              eligibleProviders.length > 0
+                ? 'bg-emerald-100 text-emerald-700'
+                : 'bg-amber-100 text-amber-700'
+            }`}>
+              {eligibleProviders.length > 0 ? (
+                <Clock className="w-8 h-8" />
+              ) : (
+                <AlertTriangle className="w-8 h-8" />
+              )}
             </div>
             <div>
-              <h3 className="text-lg font-bold text-gray-900">Service Appointment Booked!</h3>
+              <h3 className="text-lg font-bold text-gray-900">
+                {eligibleProviders.length > 0
+                  ? 'Service Request Submitted — Pending Technician Assignment'
+                  : 'Request Queued Pending — Admin Notified'}
+              </h3>
               <p className="text-xs text-gray-600 mt-1">
-                A verified expert for <span className="font-bold text-gray-800">{selectedService.name}</span> will arrive at your address during your selected slot.
+                {eligibleProviders.length > 0 ? (
+                  <>
+                    Your <span className="font-bold text-gray-800">{selectedService.name}</span> request in <span className="font-bold text-gray-800">{requestArea}</span> is pending acceptance by verified local providers ({eligibleProviders.length} active). You will be notified once a technician accepts.
+                  </>
+                ) : (
+                  <>
+                    No eligible <span className="font-bold text-gray-800">{selectedService.name}</span> provider is currently available in <span className="font-bold text-gray-800">{requestArea}</span>. Admin has been notified for locality routing approval.
+                  </>
+                )}
               </p>
             </div>
 
@@ -130,7 +222,9 @@ export const ServicesView: React.FC<ServicesViewProps> = ({
                         : 'bg-white border-gray-100 hover:border-gray-200'
                     }`}
                   >
-                    <span className="text-2xl mb-1 block">{srv.icon}</span>
+                    <div className="w-9 h-9 rounded-xl bg-emerald-50 flex items-center justify-center mb-1.5">
+                      {renderServiceIcon(srv.icon)}
+                    </div>
                     <h4 className="text-xs font-bold text-gray-900 leading-tight">{srv.name}</h4>
                     <p className="text-[10px] text-gray-500 line-clamp-1 mt-0.5">{srv.popularFor}</p>
                     <span className="inline-block mt-1 text-[11px] font-extrabold text-[#0E7438]">
@@ -144,7 +238,9 @@ export const ServicesView: React.FC<ServicesViewProps> = ({
             {/* Service Details & Schedule Form */}
             <form onSubmit={handleBooking} className="bg-white rounded-2xl border border-gray-100 p-4 shadow-xs space-y-3">
               <div className="flex items-center gap-2 pb-2 border-b border-gray-100">
-                <span className="text-2xl">{selectedService.icon}</span>
+                <div className="w-9 h-9 rounded-xl bg-emerald-50 flex items-center justify-center shrink-0">
+                  {renderServiceIcon(selectedService.icon)}
+                </div>
                 <div>
                   <h4 className="text-sm font-bold text-gray-900">{selectedService.name}</h4>
                   <p className="text-xs text-gray-500">{selectedService.popularFor}</p>

@@ -8,13 +8,15 @@ interface ShopkeeperHeaderProps {
   isAdmin?: boolean;
   onSwitchToCustomer: () => void;
   onAdminChangeStatus: (status: ShopApprovalStatus) => void;
+  onLogout?: () => void;
 }
 
 export const ShopkeeperHeader: React.FC<ShopkeeperHeaderProps> = ({
   shop,
   isAdmin = false,
   onSwitchToCustomer,
-  onAdminChangeStatus
+  onAdminChangeStatus,
+  onLogout
 }) => {
   const getStatusBadge = () => {
     switch (shop.status) {
@@ -64,22 +66,35 @@ export const ShopkeeperHeader: React.FC<ShopkeeperHeaderProps> = ({
           <PWAInstallButton variant="header" />
         </div>
 
-        {isAdmin && (
-          <div className="flex items-center gap-1.5 bg-emerald-950/60 px-2.5 py-1 rounded-xl text-[11px] border border-emerald-700/50">
-            <span className="text-gray-300 hidden sm:inline">Admin Status Control:</span>
-            <select
-              value={shop.status}
-              onChange={(e) => onAdminChangeStatus(e.target.value as ShopApprovalStatus)}
-              className="bg-transparent text-yellow-300 font-bold focus:outline-none cursor-pointer"
-              title="Admin Approval/Rejection Control"
+        <div className="flex items-center gap-1.5">
+          {isAdmin && (
+            <div className="flex items-center gap-1.5 bg-emerald-950/60 px-2.5 py-1 rounded-xl text-[11px] border border-emerald-700/50">
+              <span className="text-gray-300 hidden sm:inline">Admin Status Control:</span>
+              <select
+                value={shop.status}
+                onChange={(e) => onAdminChangeStatus(e.target.value as ShopApprovalStatus)}
+                className="bg-transparent text-yellow-300 font-bold focus:outline-none cursor-pointer"
+                title="Admin Approval/Rejection Control"
+              >
+                <option value="approved" className="text-gray-900 font-semibold">Approved (Selling Enabled)</option>
+                <option value="pending" className="text-gray-900 font-semibold">Pending (Awaiting Admin)</option>
+                <option value="rejected" className="text-gray-900 font-semibold">Rejected (Blocked)</option>
+                <option value="suspended" className="text-gray-900 font-semibold">Suspended (Paused)</option>
+              </select>
+            </div>
+          )}
+          {onLogout && (
+            <button
+              type="button"
+              onClick={onLogout}
+              title="Sign Out"
+              className="flex items-center gap-1 text-xs font-bold text-rose-100 hover:text-white bg-rose-700/80 hover:bg-rose-700 px-2.5 py-1.5 rounded-xl transition-colors"
             >
-              <option value="approved" className="text-gray-900 font-semibold">Approved (Selling Enabled)</option>
-              <option value="pending" className="text-gray-900 font-semibold">Pending (Awaiting Admin)</option>
-              <option value="rejected" className="text-gray-900 font-semibold">Rejected (Blocked)</option>
-              <option value="suspended" className="text-gray-900 font-semibold">Suspended (Paused)</option>
-            </select>
-          </div>
-        )}
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Sign Out</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Main merchant branding header */}

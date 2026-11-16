@@ -1,25 +1,39 @@
 import React, { useState } from 'react';
 import { 
-  CheckCircle2, 
   XCircle, 
   Clock, 
-  Truck, 
   Phone, 
   MapPin, 
-  ChevronDown, 
-  PackageCheck,
+  Check,
+  RotateCcw,
   AlertTriangle,
-  Filter,
-  Check
+  X
 } from 'lucide-react';
-import { Order, OrderStatus, PublicRiderCard, Shop } from '../../types';
+import {
+  DeliveryPerson,
+  Order,
+  OrderStatus,
+  PartnerAccount,
+  PublicRiderCard,
+  Shop,
+  UniversalRoutingConfig
+} from '../../types';
+import {
+  evaluatePublicRiderCardsForOrder,
+  getEligibleDeliveryRidersForOrder,
+  resolveAreaKey
+} from '../../utils/hyperlocalRouting';
 
 interface ShopOrdersTabProps {
   shop: Shop;
   orders: Order[];
   isAdmin?: boolean;
   approvedRiders?: PublicRiderCard[];
+  deliveryPersons?: DeliveryPerson[];
+  routingConfig?: UniversalRoutingConfig;
+  partnerAccounts?: PartnerAccount[];
   onUpdateOrderStatus: (orderId: string, status: OrderStatus, extra?: { rejectionReason?: string; riderId?: string; riderName?: string }) => void;
+  onReviewReturnRequest?: (orderId: string, decision: 'approved' | 'rejected', notes?: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
 export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
@@ -27,22 +41,63 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
   orders,
   isAdmin = false,
   approvedRiders = [],
-  onUpdateOrderStatus
+  deliveryPersons,
+  routingConfig,
+  partnerAccounts = [],
+  onUpdateOrderStatus,
+  onReviewReturnRequest
 }) => {
-  const [filter, setFilter] = useState<'all' | 'pending' | 'in_progress' | 'completed' | 'cancelled'>('all');
+  const [filter, setFilter] = useState<'all' | 'pending' | 'in_progress' | 'completed' | 'returns' | 'cancelled'>('all');
   const [rejectingOrderId, setRejectingOrderId] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState('Item out of stock in Kalchini mandi');
   const [selectedRiderByOrder, setSelectedRiderByOrder] = useState<Record<string, string>>({});
+  const [returnNotesByOrder, setReturnNotesByOrder] = useState<Record<string, string>>({});
+  const [reviewingOrderId, setReviewingOrderId] = useState<string | null>(null);
+  const [reviewErrorByOrder, setReviewErrorByOrder] = useState<Record<string, string>>({});
+  const [previewPhotoUrl, setPreviewPhotoUrl] = useState<string | null>(null);
 
   // Filter orders relevant to this shop
   const shopOrders = orders.filter((o) => !o.shopId || o.shopId === shop.id);
+  const returnOrdersCount = shopOrders.filter((o) => Boolean(o.returnRequest)).length;
+
+  const eligibleDispatchRiders = React.useMemo(() => {
+    if (routingConfig && deliveryPersons && deliveryPersons.length > 0) {
+      const evalRes = getEligibleDeliveryRidersForOrder({
+        pickupLocality: shop.locality,
+        config: routingConfig,
+        deliveryPersons,
+        partnerAccounts
+      });
+      const eligibleIds = new Set(evalRes.eligible.map((e) => e.partnerId));
+      return approvedRiders.filter((r) => eligibleIds.has(r.id));
+    }
+    if (routingConfig) {
+      const evalRes = evaluatePublicRiderCardsForOrder({
+        pickupLocality: shop.locality,
+        config: routingConfig,
+        approvedRiders,
+        partnerAccounts
+      });
+      const eligibleIds = new Set(evalRes.eligible.map((e) => e.partnerId));
+      return approvedRiders.filter((r) => eligibleIds.has(r.id));
+    }
+    const shopArea = resolveAreaKey(shop.locality);
+    return approvedRiders.filter(
+      (r) =>
+        r.status === 'approved' &&
+        r.isOnline &&
+        r.accountStatus !== 'suspended' &&
+        resolveAreaKey(r.currentLocation || r.locality) === shopArea
+    );
+  }, [routingConfig, deliveryPersons, approvedRiders, shop.locality, partnerAccounts]);
 
   const filteredOrders = shopOrders.filter((order) => {
-    if (filter === 'pending') return order.status === 'pending';
+    if (filter === 'pending') return order.status === 'pending' || order.status === 'placed';
     if (filter === 'in_progress') {
       return ['confirmed', 'preparing', 'ready_for_dispatch', 'out_for_delivery', 'packed'].includes(order.status);
     }
     if (filter === 'completed') return order.status === 'delivered';
+    if (filter === 'returns') return Boolean(order.returnRequest);
     if (filter === 'cancelled') return order.status === 'cancelled' || order.status === 'rejected';
     return true;
   });
@@ -56,9 +111,31 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
     setRejectingOrderId(null);
   };
 
+  const handleReturnDecision = async (orderId: string, decision: 'approved' | 'rejected') => {
+    if (!onReviewReturnRequest || reviewingOrderId === orderId) return;
+    setReviewingOrderId(orderId);
+    setReviewErrorByOrder((prev) => {
+      const next = { ...prev };
+      delete next[orderId];
+      return next;
+    });
+    try {
+      const res = await onReviewReturnRequest(orderId, decision, returnNotesByOrder[orderId]);
+      if (!res.ok) {
+        setReviewErrorByOrder((prev) => ({
+          ...prev,
+          [orderId]: res.error || 'Could not update return status.'
+        }));
+      }
+    } finally {
+      setReviewingOrderId(null);
+    }
+  };
+
   const getStatusColor = (status: OrderStatus) => {
     switch (status) {
       case 'pending':
+      case 'placed':
         return 'bg-amber-100 text-amber-800 border-amber-300';
       case 'confirmed':
         return 'bg-blue-100 text-blue-800 border-blue-300';
@@ -81,7 +158,8 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
 
   const formatStatusLabel = (status: OrderStatus) => {
     switch (status) {
-      case 'pending': return 'New Order Pending';
+      case 'pending':
+      case 'placed': return 'New Order Pending';
       case 'confirmed': return 'Confirmed';
       case 'preparing': return 'Preparing / Packing';
       case 'ready_for_dispatch':
@@ -100,9 +178,10 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
       <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
         {[
           { id: 'all', label: `All (${shopOrders.length})` },
-          { id: 'pending', label: `Pending (${shopOrders.filter((o) => o.status === 'pending').length})` },
+          { id: 'pending', label: `Pending (${shopOrders.filter((o) => o.status === 'pending' || o.status === 'placed').length})` },
           { id: 'in_progress', label: `In Fulfillment (${shopOrders.filter((o) => ['confirmed', 'preparing', 'ready_for_dispatch', 'out_for_delivery', 'packed'].includes(o.status)).length})` },
           { id: 'completed', label: `Delivered (${shopOrders.filter((o) => o.status === 'delivered').length})` },
+          { id: 'returns', label: `Returns (${returnOrdersCount})` },
           { id: 'cancelled', label: 'Cancelled / Rejected' }
         ].map((f) => (
           <button
@@ -127,20 +206,26 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
           <p className="text-xs text-gray-400">
             {filter === 'pending'
               ? 'Great job! You have no pending orders waiting for review.'
+              : filter === 'returns'
+              ? 'No customer return requests for your shop.'
               : 'Orders placed by customers in Torsa & Kalchini will appear here.'}
           </p>
         </div>
       ) : (
         <div className="space-y-3.5">
           {filteredOrders.map((order) => {
-            const isPending = order.status === 'pending';
+            const isPending = order.status === 'pending' || order.status === 'placed';
             const isTerminal = order.status === 'delivered' || order.status === 'cancelled' || order.status === 'rejected';
 
             return (
               <div
                 key={order.id}
                 className={`bg-white rounded-2xl border p-4 shadow-xs transition-all space-y-3 ${
-                  isPending ? 'border-amber-300 ring-2 ring-amber-100' : 'border-gray-100'
+                  order.returnRequest?.status === 'pending_review'
+                    ? 'border-amber-300 ring-2 ring-amber-100'
+                    : isPending
+                    ? 'border-amber-300 ring-2 ring-amber-100'
+                    : 'border-gray-100'
                 }`}
               >
                 {/* Order Header */}
@@ -154,6 +239,13 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
                     {formatStatusLabel(order.status)}
                   </span>
                 </div>
+
+                {/* Cancelled by Customer Alert */}
+                {order.status === 'cancelled' && (
+                  <div className="bg-red-50 border border-red-200 text-red-800 text-xs p-2.5 rounded-xl font-semibold">
+                    Order cancelled by customer. Do not pack or dispatch.
+                  </div>
+                )}
 
                 {/* Customer Delivery Details */}
                 <div className="bg-emerald-50/70 rounded-xl p-3 border border-emerald-100 text-xs space-y-1.5">
@@ -203,7 +295,6 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
                           </span>
                         </div>
 
-                        {/* Prescription preview button if medicine */}
                         {item.prescriptionUrl && (
                           <div className="pt-1">
                             <a
@@ -240,11 +331,107 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
                   </div>
                 )}
 
+                {/* Customer Return Request Section */}
+                {order.returnRequest && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-2 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-amber-950 flex items-center gap-1.5">
+                        <RotateCcw className="w-3.5 h-3.5 text-amber-700" />
+                        <span>Customer Return Request</span>
+                      </span>
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${
+                          order.returnRequest.status === 'approved'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : order.returnRequest.status === 'rejected'
+                            ? 'bg-red-100 text-red-800'
+                            : 'bg-amber-200 text-amber-900'
+                        }`}
+                      >
+                        {order.returnRequest.status === 'pending_review'
+                          ? 'Pending Review'
+                          : order.returnRequest.status}
+                      </span>
+                    </div>
+
+                    <p className="text-gray-900">
+                      <strong>Reason:</strong> {order.returnRequest.reason}
+                    </p>
+                    {order.returnRequest.description && (
+                      <p className="text-gray-700">
+                        <strong>Customer Note:</strong> {order.returnRequest.description}
+                      </p>
+                    )}
+
+                    {order.returnRequest.photoEvidenceUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewPhotoUrl(order.returnRequest?.photoEvidenceUrl || null)}
+                        className="inline-flex items-center gap-2 bg-white border border-amber-200 rounded-lg p-1.5 hover:bg-amber-100/50 text-[11px] font-semibold text-gray-800"
+                      >
+                        <img
+                          src={order.returnRequest.photoEvidenceUrl}
+                          alt="Return evidence"
+                          className="w-10 h-10 rounded-md object-cover border border-gray-200"
+                        />
+                        <span>Inspect Photo Evidence</span>
+                      </button>
+                    )}
+
+                    {order.returnRequest.reviewNotes && (
+                      <p className="text-[11px] bg-white p-2 rounded-lg border border-amber-200 text-gray-800">
+                        <strong>Review Decision Note:</strong> {order.returnRequest.reviewNotes}
+                      </p>
+                    )}
+
+                    {reviewErrorByOrder[order.id] && (
+                      <div className="bg-red-50 border border-red-200 text-red-800 p-2 rounded-lg text-[11px] flex items-start gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0 mt-0.5" />
+                        <span>{reviewErrorByOrder[order.id]}</span>
+                      </div>
+                    )}
+
+                    {onReviewReturnRequest && order.returnRequest.status === 'pending_review' && (
+                      <div className="pt-2 border-t border-amber-200/80 space-y-2">
+                        <input
+                          type="text"
+                          placeholder="Review note (optional)..."
+                          value={returnNotesByOrder[order.id] || ''}
+                          onChange={(e) =>
+                            setReturnNotesByOrder((prev) => ({
+                              ...prev,
+                              [order.id]: e.target.value
+                            }))
+                          }
+                          className="w-full bg-white border border-amber-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-800"
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            disabled={reviewingOrderId === order.id}
+                            onClick={() => handleReturnDecision(order.id, 'approved')}
+                            className="flex-1 bg-[#0E7438] hover:bg-emerald-800 disabled:opacity-50 text-white font-bold py-1.5 rounded-lg text-xs"
+                          >
+                            {reviewingOrderId === order.id ? 'Saving...' : 'Approve Return'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={reviewingOrderId === order.id}
+                            onClick={() => handleReturnDecision(order.id, 'rejected')}
+                            className="flex-1 bg-white hover:bg-red-50 disabled:opacity-50 text-red-700 border border-red-200 font-bold py-1.5 rounded-lg text-xs"
+                          >
+                            Reject Return
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Actions & Status Updater */}
                 {!isTerminal && (
                   <div className="pt-2 border-t border-gray-100">
                     {isPending ? (
-                      /* Accept or Reject buttons */
                       <div className="flex gap-2">
                         <button
                           onClick={() => handleAcceptOrder(order.id)}
@@ -262,7 +449,6 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
                         </button>
                       </div>
                     ) : (
-                      /* Status Advancement Selector */
                       <div className="space-y-2">
                         <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider block">
                           Update Fulfillment Status
@@ -275,11 +461,11 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
                         {(order.status === 'ready_for_dispatch' || order.status === 'packed') && (
                           <div className="space-y-1 bg-slate-50 p-2 rounded-xl border border-slate-200">
                             <label className="text-[10px] font-bold text-slate-600 block">
-                              Select Verified Approved Fleet Rider (Required for Dispatch)
+                              Select Locality-Eligible Fleet Rider ({shop.locality})
                             </label>
-                            {approvedRiders.length === 0 ? (
+                            {eligibleDispatchRiders.length === 0 ? (
                               <p className="text-[11px] text-amber-800 bg-amber-50 px-2 py-1 rounded border border-amber-200">
-                                No approved riders loaded from fleet directory. Rider assignment blocked until an approved rider record is available.
+                                No eligible online rider in {shop.locality}. Cross-locality dispatch is blocked unless approved by Admin Locality Routing.
                               </p>
                             ) : (
                               <select
@@ -292,8 +478,8 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
                                 }
                                 className="w-full text-xs p-2 rounded-lg border border-slate-300 bg-white font-medium"
                               >
-                                <option value="">-- Choose Approved Rider --</option>
-                                {approvedRiders.map((rider) => (
+                                <option value="">-- Choose Eligible Local Rider --</option>
+                                {eligibleDispatchRiders.map((rider) => (
                                   <option key={rider.id} value={rider.id}>
                                     {rider.name} ({rider.locality}){rider.isOnline ? ' • Online' : ''}
                                   </option>
@@ -330,7 +516,7 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
                           <button
                             onClick={() => {
                               const chosenId = selectedRiderByOrder[order.id];
-                              const chosenRider = approvedRiders.find((r) => r.id === chosenId);
+                              const chosenRider = eligibleDispatchRiders.find((r) => r.id === chosenId);
                               if (!chosenRider) return;
                               onUpdateOrderStatus(order.id, 'out_for_delivery', {
                                 riderId: chosenRider.id,
@@ -339,7 +525,7 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
                             }}
                             disabled={
                               order.status === 'out_for_delivery' ||
-                              !approvedRiders.some((r) => r.id === selectedRiderByOrder[order.id])
+                              !eligibleDispatchRiders.some((r) => r.id === selectedRiderByOrder[order.id])
                             }
                             className={`text-xs py-1.5 px-2 rounded-lg font-bold border transition-colors ${
                               order.status === 'out_for_delivery'
@@ -423,6 +609,27 @@ export const ShopOrdersTab: React.FC<ShopOrdersTabProps> = ({
           </div>
         </div>
       )}
+
+      {/* Photo Preview Modal */}
+      {previewPhotoUrl && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+          onClick={() => setPreviewPhotoUrl(null)}
+        >
+          <div className="relative max-w-md w-full bg-white rounded-2xl p-2" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={() => setPreviewPhotoUrl(null)}
+              className="absolute top-3 right-3 bg-black/70 text-white rounded-full p-1.5"
+              aria-label="Close preview"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <img src={previewPhotoUrl} alt="Return evidence" className="w-full max-h-[75vh] object-contain rounded-xl" />
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

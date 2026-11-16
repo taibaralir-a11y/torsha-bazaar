@@ -112,7 +112,8 @@
         "isOnline": { "type": "boolean" },
         "totalRides": { "type": "number" },
         "rating": { "type": "number" },
-        "createdAt": { "type": "string" }
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
       },
       "required": ["id", "name", "phone", "vehicleType", "vehicleNumber", "status"]
     },
@@ -592,11 +593,79 @@
         "id": { "type": "string" },
         "name": { "type": "string" },
         "locality": { "type": "string" },
+        "currentLocation": { "type": "string" },
+        "servedLocalities": { "type": "array", "items": { "type": "string" } },
         "status": { "type": "string", "enum": ["pending", "approved", "rejected", "suspended"] },
         "isOnline": { "type": "boolean" },
-        "rating": { "type": "number" }
+        "accountStatus": { "type": "string", "enum": ["active", "suspended"] },
+        "rating": { "type": "number" },
+        "updatedAt": { "type": "string" }
       },
       "required": ["id", "name", "locality", "status"]
+    },
+    "PublicDriverCard": {
+      "title": "PublicDriverCard",
+      "description": "Public non-PII approved Toto/Auto/Taxi driver projection (excludes ownerId, phone, email, vehicleNumber, licenseNumber)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "vehicleType": { "type": "string", "enum": ["taxi", "auto", "toto"] },
+        "locality": { "type": "string" },
+        "currentLocation": { "type": "string" },
+        "servedLocalities": { "type": "array", "items": { "type": "string" } },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "suspended"] },
+        "isOnline": { "type": "boolean" },
+        "accountStatus": { "type": "string", "enum": ["active", "suspended"] },
+        "rating": { "type": "number" },
+        "totalRides": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "vehicleType", "locality", "status"]
+    },
+    "PublicScrapListing": {
+      "title": "PublicScrapListing",
+      "description": "PII-free open scrap summary visible to active Kabari buyers (excludes customerId, customerName, customerPhone, pickupAddress, selectedBuyer*)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "category": { "type": "string" },
+        "categoryLabel": { "type": "string" },
+        "estimatedWeight": { "type": "string" },
+        "description": { "type": "string" },
+        "photos": { "type": "array", "items": { "type": "string" } },
+        "locality": { "type": "string" },
+        "pincode": { "type": "string" },
+        "approxWeightKg": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": ["open", "offers_received", "accepted", "pickup_scheduled", "picked_up", "completed", "cancelled"]
+        },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "category", "categoryLabel", "estimatedWeight", "locality", "pincode", "status"]
+    },
+    "ScrapOffer": {
+      "title": "ScrapOffer",
+      "description": "Isolated Kabari buyer offer stored at /scrapRequests/{requestId}/offers/{requestId}_{uid}",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "requestId": { "type": "string" },
+        "scrapRequestId": { "type": "string" },
+        "buyerId": { "type": "string" },
+        "buyerName": { "type": "string" },
+        "buyerPhone": { "type": "string" },
+        "pricePerKg": { "type": "number" },
+        "totalOfferAmount": { "type": "number" },
+        "pickupTimeEstimate": { "type": "string" },
+        "notes": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "rejected"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "requestId", "buyerId", "buyerName", "totalOfferAmount", "pickupTimeEstimate", "status"]
     },
     "AdminActivity": {
       "title": "AdminActivity",
@@ -610,10 +679,80 @@
         "timestamp": { "type": "string" }
       },
       "required": ["id", "adminEmail", "action", "details", "timestamp"]
+    },
+    "PartnerAccount": {
+      "title": "PartnerAccount",
+      "description": "Admin-issued partner role account mapped to a Firebase Auth UID (no passwords stored)",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "role": {
+          "type": "string",
+          "enum": ["shopkeeper", "driver", "delivery", "doctor", "service_provider", "employer", "kabari"]
+        },
+        "displayName": { "type": "string", "maxLength": 150 },
+        "loginEmail": { "type": "string", "maxLength": 150 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "linkedEntityId": { "type": "string", "maxLength": 128 },
+        "status": {
+          "type": "string",
+          "enum": ["active", "suspended"]
+        },
+        "suspendedEntityPreviousStatus": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected", "suspended"]
+        },
+        "assignedBy": { "type": "string", "maxLength": 150 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "role", "displayName", "loginEmail", "status", "assignedBy"]
+    },
+    "PhoneAuthLookup": {
+      "title": "PhoneAuthLookup",
+      "description": "SHA-256 hashed mobile number lookup resolving to an Admin-issued partner login email",
+      "type": "object",
+      "properties": {
+        "loginEmail": { "type": "string", "maxLength": 150 },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["loginEmail"]
+    },
+    "UniversalRoutingConfig": {
+      "title": "UniversalRoutingConfig",
+      "description": "Admin-managed locality-to-partner routing rules and cross-locality switches",
+      "type": "object",
+      "properties": {
+        "globalCrossLocalityEnabled": { "type": "boolean" },
+        "rulesByLocality": { "type": "object" },
+        "updatedBy": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["globalCrossLocalityEnabled", "rulesByLocality"]
+    },
+    "RoutingAlert": {
+      "title": "RoutingAlert",
+      "description": "Admin alert raised when a request cannot find an eligible partner inside approved service localities",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "requestId": { "type": "string" },
+        "serviceCategory": { "type": "string", "enum": ["shop_order", "delivery", "ride", "service"] },
+        "requestLocality": { "type": "string" },
+        "vehicleType": { "type": "string" },
+        "serviceRequired": { "type": "string" },
+        "message": { "type": "string" },
+        "status": { "type": "string", "enum": ["open", "resolved"] },
+        "createdAt": { "type": "string" },
+        "resolvedAt": { "type": "string" }
+      },
+      "required": ["id", "requestId", "serviceCategory", "requestLocality", "message", "status", "createdAt"]
     }
   },
   "firestore": {
     "/customers/{customerId}": { "schema": "Customer", "description": "Customer profiles and delivery localities" },
+    "/partnerAccounts/{uid}": { "schema": "PartnerAccount", "description": "Admin-issued partner role assignments mapped 1:1 to Firebase Auth UIDs" },
+    "/phoneAuthLookup/{phoneHash}": { "schema": "PhoneAuthLookup", "description": "SHA-256 hashed mobile lookup to partner Auth loginEmail (Admin write only)" },
     "/doctors/{doctorId}": { "schema": "Doctor", "description": "Private registered physician records (owner & admin only)" },
     "/publicDoctors/{doctorId}": { "schema": "PublicDoctorCard", "description": "Public non-PII approved physician directory cards" },
     "/emergencyDoctorRequests/{requestId}": { "schema": "EmergencyDoctorRequest", "description": "Urgent medical home visit requests" },
@@ -623,10 +762,11 @@
     "/publicProducts/{productId}": { "schema": "PublicProductCard", "description": "Public non-PII approved products (no ownerId; parent shop verified)" },
     "/orders/{orderId}": { "schema": "Order", "description": "Customer store orders" },
     "/localities/{localityId}": { "schema": "Locality", "description": "Centrally managed Dooars localities" },
-    "/drivers/{driverId}": { "schema": "Driver", "description": "Taxi, Auto, Toto drivers" },
+    "/drivers/{driverId}": { "schema": "Driver", "description": "Taxi, Auto, Toto drivers (owner & admin only)" },
+    "/publicDrivers/{driverId}": { "schema": "PublicDriverCard", "description": "Public non-PII approved Taxi/Auto/Toto driver cards" },
     "/rideBookings/{rideId}": { "schema": "RideBooking", "description": "Ride hailing requests" },
     "/deliveryPersons/{personId}": { "schema": "DeliveryPerson", "description": "Private courier delivery fleet records (owner & admin only)" },
-    "/publicRiders/{riderId}": { "schema": "PublicRiderCard", "description": "Signed-in non-PII approved rider cards for dispatch verification" },
+    "/publicRiders/{riderId}": { "schema": "PublicRiderCard", "description": "Signed-in non-PII approved fleet rider cards for dispatch verification" },
     "/deliveries/{deliveryId}": { "schema": "DeliveryRequest", "description": "Parcel dispatch requests" },
     "/serviceProviders/{providerId}": { "schema": "ServiceProvider", "description": "Private local technician records (owner & admin only)" },
     "/publicServiceProviders/{providerId}": { "schema": "PublicServiceProviderCard", "description": "Public non-PII approved technician directory cards" },
@@ -635,10 +775,14 @@
     "/publicJobs/{jobId}": { "schema": "PublicJobCard", "description": "Public non-PII approved job directory cards" },
     "/jobApplications/{appId}": { "schema": "JobApplication", "description": "Job applications verified against /jobs/{jobId}" },
     "/complaints/{complaintId}": { "schema": "Complaint", "description": "Support tickets" },
-    "/scrapRequests/{requestId}": { "schema": "ScrapRequest", "description": "Kabari scrap selling requests and offers" },
+    "/publicScrapListings/{requestId}": { "schema": "PublicScrapListing", "description": "PII-free open scrap summaries visible to active Kabari buyers" },
+    "/scrapRequests/{requestId}": { "schema": "ScrapRequest", "description": "Private customer & assigned buyer scrap pickup requests" },
+    "/scrapRequests/{requestId}/offers/{offerId}": { "schema": "ScrapOffer", "description": "Isolated Kabari buyer quotes per requestId_uid" },
     "/rideDispatch/{dispatchId}": { "schema": "RideDispatchSummary", "description": "Non-PII ride dispatch feed (Admin/Backend locked)" },
     "/deliveryDispatch/{dispatchId}": { "schema": "DeliveryDispatchSummary", "description": "Non-PII delivery dispatch feed (Admin/Backend locked)" },
     "/emergencyDispatch/{dispatchId}": { "schema": "EmergencyDispatchSummary", "description": "Non-PII emergency dispatch feed (Admin/Backend locked)" },
+    "/routingConfig/{configId}": { "schema": "UniversalRoutingConfig", "description": "Admin-managed locality routing matrix and cross-locality controls" },
+    "/routingAlerts/{alertId}": { "schema": "RoutingAlert", "description": "Super Admin unresolved locality routing alerts" },
     "/adminActivity/{activityId}": { "schema": "AdminActivity", "description": "Verified Super Admin audit logs" }
   }
 }

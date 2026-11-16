@@ -3,21 +3,23 @@ import { HeroBanner } from './HeroBanner';
 import { ServicesGrid } from './ServicesGrid';
 import { BestDealsSection } from './BestDealsSection';
 import { FastDeliveryCard } from './FastDeliveryCard';
-import { Product, CartItem, ServiceType, LanguageCode } from '../types';
+import {
+  Product,
+  CartItem,
+  ServiceType,
+  LanguageCode
+} from '../types';
 import { 
   ArrowRight, 
   QrCode, 
   PhoneCall, 
   Sparkles, 
-  ShieldCheck, 
   Smartphone, 
   Pill, 
   Beef, 
   Recycle, 
   MapPin,
-  Clock,
-  Stethoscope,
-  AlertTriangle
+  Stethoscope
 } from 'lucide-react';
 import { TRANSLATIONS } from '../utils/translations';
 

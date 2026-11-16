@@ -12,7 +12,8 @@ import {
   AlertCircle, 
   ArrowLeft,
   Building,
-  UserCheck
+  UserCheck,
+  LogOut
 } from 'lucide-react';
 import { JobListing, JobApplication, JobCategoryType } from '../../types';
 
@@ -22,6 +23,7 @@ interface EmployerDashboardProps {
   onSwitchPortal: () => void;
   onPostJob: (job: Omit<JobListing, 'id' | 'applicantsCount' | 'status' | 'createdAt'>) => void;
   onUpdateApplicationStatus: (appId: string, status: 'pending' | 'shortlisted' | 'hired' | 'rejected') => void;
+  onLogout?: () => void;
 }
 
 export const EmployerDashboard: React.FC<EmployerDashboardProps> = ({
@@ -30,6 +32,7 @@ export const EmployerDashboard: React.FC<EmployerDashboardProps> = ({
   onSwitchPortal,
   onPostJob,
   onUpdateApplicationStatus,
+  onLogout,
 }) => {
   const [activeTab, setActiveTab] = useState<'listings' | 'applicants' | 'post'>('listings');
   const [showPostModal, setShowPostModal] = useState(false);
@@ -108,13 +111,25 @@ export const EmployerDashboard: React.FC<EmployerDashboardProps> = ({
             </div>
           </div>
 
-          <button
-            onClick={() => setShowPostModal(true)}
-            className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded-xl shadow-sm transition-all"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            Post Vacancy
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setShowPostModal(true)}
+              className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded-xl shadow-sm transition-all"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Post Vacancy
+            </button>
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                title="Sign Out"
+                className="p-1.5 bg-rose-700/80 hover:bg-rose-700 text-white rounded-xl transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Quick info banner */}

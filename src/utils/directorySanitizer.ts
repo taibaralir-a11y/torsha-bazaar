@@ -5,12 +5,17 @@ import {
   Product,
   JobListing,
   DeliveryPerson,
+  Driver,
+  ScrapRequest,
   PublicShopCard,
   PublicDoctorCard,
   PublicServiceProviderCard,
   PublicProductCard,
   PublicJobCard,
-  PublicRiderCard
+  PublicRiderCard,
+  PublicDriverCard,
+  PublicScrapListing,
+  PartnerAccountStatus
 } from '../types';
 
 /**
@@ -281,8 +286,11 @@ export function fromPublicJobCard(card: PublicJobCard): JobListing {
  * Strips ownerId, phone, and email so shopkeepers can select verified rider IDs
  * without exposing rider personal contact information.
  */
-export function toPublicRiderCard(rider: DeliveryPerson): PublicRiderCard {
-  return {
+export function toPublicRiderCard(
+  rider: DeliveryPerson,
+  accountStatus?: PartnerAccountStatus
+): PublicRiderCard {
+  const card: PublicRiderCard = {
     id: rider.id,
     name: rider.name,
     locality: rider.locality,
@@ -291,6 +299,14 @@ export function toPublicRiderCard(rider: DeliveryPerson): PublicRiderCard {
     rating: Number(rider.rating || 4.8),
     updatedAt: new Date().toISOString()
   };
+
+  if (rider.currentLocation) card.currentLocation = rider.currentLocation;
+  if (Array.isArray(rider.servedLocalities) && rider.servedLocalities.length > 0) {
+    card.servedLocalities = rider.servedLocalities;
+  }
+  if (accountStatus) card.accountStatus = accountStatus;
+
+  return card;
 }
 
 export function fromPublicRiderCard(card: PublicRiderCard): DeliveryPerson {
@@ -301,7 +317,103 @@ export function fromPublicRiderCard(card: PublicRiderCard): DeliveryPerson {
     status: card.status,
     isOnline: card.isOnline,
     locality: card.locality,
+    ...(card.currentLocation ? { currentLocation: card.currentLocation } : {}),
+    ...(Array.isArray(card.servedLocalities) ? { servedLocalities: card.servedLocalities } : {}),
     totalDelivered: 0,
     rating: card.rating
+  };
+}
+
+/**
+ * Strict allowlist sanitizer for publicDrivers collection.
+ * Strips ownerId, phone, email, licenseNumber, and vehicleNumber so customers
+ * can verify live local driver availability without accessing driver PII.
+ */
+export function toPublicDriverCard(
+  driver: Driver,
+  accountStatus?: PartnerAccountStatus
+): PublicDriverCard {
+  const card: PublicDriverCard = {
+    id: driver.id,
+    name: driver.name,
+    vehicleType: driver.vehicleType,
+    locality: driver.locality || driver.currentLocation || 'Satali',
+    status: driver.status,
+    isOnline: Boolean(driver.isOnline),
+    rating: Number(driver.rating || 4.8),
+    totalRides: Number(driver.totalRides || 0),
+    updatedAt: new Date().toISOString()
+  };
+
+  if (driver.currentLocation) card.currentLocation = driver.currentLocation;
+  if (Array.isArray(driver.servedLocalities) && driver.servedLocalities.length > 0) {
+    card.servedLocalities = driver.servedLocalities;
+  }
+  if (accountStatus) card.accountStatus = accountStatus;
+
+  return card;
+}
+
+export function fromPublicDriverCard(card: PublicDriverCard): Driver {
+  return {
+    id: card.id,
+    name: card.name,
+    phone: '',
+    vehicleType: card.vehicleType,
+    vehicleNumber: '',
+    locality: card.locality,
+    ...(card.currentLocation ? { currentLocation: card.currentLocation } : {}),
+    ...(Array.isArray(card.servedLocalities) ? { servedLocalities: card.servedLocalities } : {}),
+    status: card.status,
+    approvalStatus: card.status,
+    isOnline: card.isOnline,
+    totalRides: Number(card.totalRides || 0),
+    rating: card.rating,
+    updatedAt: card.updatedAt
+  };
+}
+
+/**
+ * Strict allowlist sanitizer for publicScrapListings collection.
+ * Strips customerId, customerName, customerPhone, pickupAddress,
+ * selectedOfferId, selectedBuyerId, selectedBuyerName, selectedBuyerPhone,
+ * and finalPaidAmount so unauthorized kabari buyers cannot read customer PII.
+ */
+export function toPublicScrapListing(req: ScrapRequest): PublicScrapListing {
+  return {
+    id: req.id,
+    category: req.category,
+    categoryLabel: req.categoryLabel,
+    estimatedWeight: req.estimatedWeight,
+    ...(req.approxWeightKg !== undefined ? { approxWeightKg: req.approxWeightKg } : {}),
+    description: req.description,
+    photos: Array.isArray(req.photos) ? req.photos : [],
+    locality: req.locality,
+    pincode: req.pincode,
+    status: req.status,
+    createdAt: req.createdAt,
+    updatedAt: req.updatedAt || new Date().toISOString()
+  };
+}
+
+export function fromPublicScrapListing(card: PublicScrapListing): ScrapRequest {
+  return {
+    id: card.id,
+    customerId: '',
+    customerName: 'Verified Local Seller',
+    customerPhone: '',
+    category: card.category,
+    categoryLabel: card.categoryLabel,
+    estimatedWeight: card.estimatedWeight,
+    ...(card.approxWeightKg !== undefined ? { approxWeightKg: card.approxWeightKg } : {}),
+    description: card.description,
+    photos: Array.isArray(card.photos) ? card.photos : [],
+    pickupAddress: `${card.locality} (${card.pincode}) — Address disclosed to assigned buyer after confirmation`,
+    locality: card.locality,
+    pincode: card.pincode,
+    status: card.status,
+    offers: [],
+    createdAt: card.createdAt,
+    updatedAt: card.updatedAt
   };
 }

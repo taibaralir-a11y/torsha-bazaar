@@ -20,38 +20,69 @@ import {
   Send,
   Check,
   X,
-  MessageSquare
+  MessageSquare,
+  LogOut
 } from 'lucide-react';
-import { Driver, RideBooking, RideStatus, ShopApprovalStatus, VehicleType, FareOffer } from '../../types';
+import {
+  Driver,
+  PartnerAccount,
+  RideBooking,
+  RideStatus,
+  ShopApprovalStatus,
+  UniversalRoutingConfig,
+  VehicleType,
+  FareOffer
+} from '../../types';
+import {
+  evaluateRideDriverEligibility,
+  resolveAreaKey
+} from '../../utils/hyperlocalRouting';
 import { PWAInstallButton } from '../common/PWAInstallButton';
+
+interface DriverActionResult {
+  ok: boolean;
+  backendRequired?: boolean;
+  error?: string;
+}
 
 interface DriverDashboardProps {
   driver: Driver;
   rideBookings: RideBooking[];
+  routingConfig?: UniversalRoutingConfig;
+  partnerAccounts?: PartnerAccount[];
   onSwitchPortal: () => void;
   onUpdateDriver: (updated: Partial<Driver>) => void;
-  onUpdateRideStatus: (rideId: string, status: RideStatus) => void;
+  onUpdateRideStatus: (rideId: string, status: RideStatus) => Promise<DriverActionResult | void> | void;
   onAcceptRide: (
-    rideId: string, 
-    driverId: string, 
-    driverName: string, 
-    driverPhone: string, 
+    rideId: string,
+    driverId: string,
+    driverName: string,
+    driverPhone: string,
     vehicleNumber: string,
     agreedFare?: number
-  ) => void;
-  onDriverCounterOffer?: (rideId: string, driver: Driver, counterAmount: number, note?: string) => void;
-  onDriverRejectRide?: (rideId: string, driverId: string) => void;
+  ) => Promise<DriverActionResult | void> | void;
+  onDriverCounterOffer?: (
+    rideId: string,
+    driver: Driver,
+    counterAmount: number,
+    note?: string
+  ) => Promise<DriverActionResult | void> | void;
+  onDriverRejectRide?: (rideId: string, driverId: string) => Promise<DriverActionResult | void> | void;
+  onLogout?: () => void;
 }
 
 export const DriverDashboard: React.FC<DriverDashboardProps> = ({
   driver,
   rideBookings,
+  routingConfig,
+  partnerAccounts = [],
   onSwitchPortal,
   onUpdateDriver,
   onUpdateRideStatus,
   onAcceptRide,
   onDriverCounterOffer,
-  onDriverRejectRide
+  onDriverRejectRide,
+  onLogout
 }) => {
   const [activeTab, setActiveTab] = useState<'rides' | 'active' | 'history' | 'profile'>('rides');
   const [showEditModal, setShowEditModal] = useState(false);
@@ -68,8 +99,11 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
 
   // Local rejected rides tracking for this driver session
   const [rejectedRideIds, setRejectedRideIds] = useState<string[]>([]);
+  const [actionNotice, setActionNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [isSubmittingAction, setIsSubmittingAction] = useState(false);
+  const [confirmCancelRideId, setConfirmCancelRideId] = useState<string | null>(null);
 
-  // Available rides for this vehicle type that are waiting for response or in negotiation
+  // Available rides strictly filtered by Admin locality routing, online status, approval, and vehicle type
   const availableRides = rideBookings.filter((r) => {
     if (rejectedRideIds.includes(r.id)) return false;
     const isMatchingVehicle = !r.vehicleType || r.vehicleType === driver.vehicleType;
@@ -83,8 +117,23 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
     
     // Do not show in available if already assigned to someone else
     if (r.driverId && r.driverId !== driver.id) return false;
-    
-    return isMatchingVehicle && isWaitingStatus;
+    if (!isMatchingVehicle || !isWaitingStatus) return false;
+
+    const reqLoc = r.pickupLocality || r.pickupLocation;
+    if (routingConfig) {
+      return evaluateRideDriverEligibility(
+        reqLoc,
+        r.vehicleType || driver.vehicleType,
+        driver,
+        routingConfig,
+        partnerAccounts
+      ).isEligible;
+    }
+    return (
+      driver.status === 'approved' &&
+      driver.isOnline &&
+      resolveAreaKey(reqLoc) === resolveAreaKey(driver.currentLocation || driver.locality || '')
+    );
   });
 
   // Active ride currently confirmed or assigned to this driver
@@ -139,19 +188,52 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
     setCounterNote('');
   };
 
-  const handleSendCounterOffer = () => {
-    if (!counterModalRide) return;
+  const handleSendCounterOffer = async () => {
+    if (!counterModalRide || isSubmittingAction) return;
+    setActionNotice(null);
     if (onDriverCounterOffer) {
-      onDriverCounterOffer(counterModalRide.id, driver, counterAmount, counterNote.trim() || undefined);
+      setIsSubmittingAction(true);
+      try {
+        const res = await onDriverCounterOffer(
+          counterModalRide.id,
+          driver,
+          counterAmount,
+          counterNote.trim() || undefined
+        );
+        if (res && res.ok === false) {
+          setActionNotice({
+            type: 'err',
+            text: res.error || 'Sending counter-offers requires backend Cloud Functions dispatch.'
+          });
+          setCounterModalRide(null);
+          return;
+        }
+      } finally {
+        setIsSubmittingAction(false);
+      }
     }
     setCounterModalRide(null);
   };
 
-  const handleRejectRide = (rideId: string) => {
-    setRejectedRideIds((prev) => [...prev, rideId]);
+  const handleRejectRide = async (rideId: string) => {
+    if (isSubmittingAction) return;
+    setActionNotice(null);
     if (onDriverRejectRide) {
-      onDriverRejectRide(rideId, driver.id);
+      setIsSubmittingAction(true);
+      try {
+        const res = await onDriverRejectRide(rideId, driver.id);
+        if (res && res.ok === false) {
+          setActionNotice({
+            type: 'err',
+            text: res.error || 'Rejecting shared ride requests requires backend Cloud Functions dispatch.'
+          });
+          return;
+        }
+      } finally {
+        setIsSubmittingAction(false);
+      }
     }
+    setRejectedRideIds((prev) => [...prev, rideId]);
   };
 
   return (
@@ -192,6 +274,16 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
               <Power className="w-3.5 h-3.5" />
               {driver.isOnline ? 'ONLINE' : 'OFFLINE'}
             </button>
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                title="Sign Out"
+                className="p-1.5 bg-rose-700/80 hover:bg-rose-700 text-white rounded-lg transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -317,6 +409,27 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
 
       {/* Main Content */}
       <div className="p-4 space-y-4 flex-1">
+        {actionNotice && (
+          <div
+            className={`rounded-2xl p-3 text-xs font-semibold flex items-start justify-between gap-2 border ${
+              actionNotice.type === 'err'
+                ? 'bg-rose-50 border-rose-200 text-rose-900'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{actionNotice.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionNotice(null)}
+              className="font-bold opacity-70 hover:opacity-100"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {/* TAB 1: NEW TRIP REQUESTS & FARE NEGOTIATION */}
         {activeTab === 'rides' && (
           <div className="space-y-3">
@@ -421,17 +534,31 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                     <div className="pt-1 grid grid-cols-3 gap-2">
                       {/* Action 1: Accept Customer's Offer */}
                       <button
-                        disabled={!isApproved || !driver.isOnline}
-                        onClick={() => {
-                          onAcceptRide(
-                            ride.id,
-                            driver.id,
-                            driver.name,
-                            driver.phone,
-                            driver.vehicleNumber,
-                            customerFare
-                          );
-                          setActiveTab('active');
+                        type="button"
+                        disabled={!isApproved || !driver.isOnline || isSubmittingAction}
+                        onClick={async () => {
+                          setActionNotice(null);
+                          setIsSubmittingAction(true);
+                          try {
+                            const res = await onAcceptRide(
+                              ride.id,
+                              driver.id,
+                              driver.name,
+                              driver.phone,
+                              driver.vehicleNumber,
+                              customerFare
+                            );
+                            if (res && res.ok === false) {
+                              setActionNotice({
+                                type: 'err',
+                                text: res.error || 'Ride acceptance requires backend Cloud Functions dispatch.'
+                              });
+                              return;
+                            }
+                            setActiveTab('active');
+                          } finally {
+                            setIsSubmittingAction(false);
+                          }
                         }}
                         className="py-2.5 px-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 text-white font-bold rounded-xl text-xs transition-all flex flex-col items-center justify-center gap-1 shadow-sm active:scale-95"
                       >
@@ -441,7 +568,8 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
 
                       {/* Action 2: Counter Offer */}
                       <button
-                        disabled={!isApproved || !driver.isOnline}
+                        type="button"
+                        disabled={!isApproved || !driver.isOnline || isSubmittingAction}
                         onClick={() => openCounterModal(ride)}
                         className="py-2.5 px-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-300 text-white font-bold rounded-xl text-xs transition-all flex flex-col items-center justify-center gap-1 shadow-sm active:scale-95"
                       >
@@ -451,8 +579,10 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
 
                       {/* Action 3: Reject / Decline */}
                       <button
+                        type="button"
+                        disabled={isSubmittingAction}
                         onClick={() => handleRejectRide(ride.id)}
-                        className="py-2.5 px-2 bg-gray-100 hover:bg-red-50 text-gray-700 hover:text-red-700 font-bold rounded-xl text-xs transition-colors flex flex-col items-center justify-center gap-1"
+                        className="py-2.5 px-2 bg-gray-100 hover:bg-red-50 disabled:opacity-50 text-gray-700 hover:text-red-700 font-bold rounded-xl text-xs transition-colors flex flex-col items-center justify-center gap-1"
                       >
                         <X className="w-4 h-4 text-gray-500" />
                         <span>Decline</span>
@@ -535,8 +665,19 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                   <label className="text-xs font-bold text-gray-700 block">Trip Stage Progression:</label>
                   <div className="grid grid-cols-2 gap-2">
                     <button
-                      onClick={() => onUpdateRideStatus(currentAssignedRide.id, 'PICKUP')}
-                      className={`p-2.5 rounded-xl text-xs font-bold border transition-all ${
+                      type="button"
+                      disabled={isSubmittingAction}
+                      onClick={async () => {
+                        setActionNotice(null);
+                        setIsSubmittingAction(true);
+                        try {
+                          const res = await onUpdateRideStatus(currentAssignedRide.id, 'PICKUP');
+                          if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not update ride stage.' });
+                        } finally {
+                          setIsSubmittingAction(false);
+                        }
+                      }}
+                      className={`p-2.5 rounded-xl text-xs font-bold border transition-all disabled:opacity-50 ${
                         currentAssignedRide.status === 'PICKUP' || currentAssignedRide.status === 'driver_arriving'
                           ? 'bg-amber-500 text-white border-amber-600 shadow-sm'
                           : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
@@ -546,8 +687,19 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                     </button>
 
                     <button
-                      onClick={() => onUpdateRideStatus(currentAssignedRide.id, 'IN_PROGRESS')}
-                      className={`p-2.5 rounded-xl text-xs font-bold border transition-all ${
+                      type="button"
+                      disabled={isSubmittingAction}
+                      onClick={async () => {
+                        setActionNotice(null);
+                        setIsSubmittingAction(true);
+                        try {
+                          const res = await onUpdateRideStatus(currentAssignedRide.id, 'IN_PROGRESS');
+                          if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not update ride stage.' });
+                        } finally {
+                          setIsSubmittingAction(false);
+                        }
+                      }}
+                      className={`p-2.5 rounded-xl text-xs font-bold border transition-all disabled:opacity-50 ${
                         currentAssignedRide.status === 'IN_PROGRESS' || currentAssignedRide.status === 'ride_started'
                           ? 'bg-blue-600 text-white border-blue-700 shadow-sm'
                           : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
@@ -558,24 +710,69 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                   </div>
 
                   <button
-                    onClick={() => onUpdateRideStatus(currentAssignedRide.id, 'COMPLETED')}
-                    className="w-full py-3 bg-[#0E7438] hover:bg-emerald-800 text-white font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-2 shadow-md mt-2"
+                    type="button"
+                    disabled={isSubmittingAction}
+                    onClick={async () => {
+                      setActionNotice(null);
+                      setIsSubmittingAction(true);
+                      try {
+                        const res = await onUpdateRideStatus(currentAssignedRide.id, 'COMPLETED');
+                        if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not complete ride.' });
+                      } finally {
+                        setIsSubmittingAction(false);
+                      }
+                    }}
+                    className="w-full py-3 bg-[#0E7438] hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-2 shadow-md mt-2"
                   >
                     <CheckCircle2 className="w-4 h-4" />
                     Complete Trip & Collect Fare (₹{currentAssignedRide.agreedFare || currentAssignedRide.customerProposedFare || currentAssignedRide.estimatedFare})
                   </button>
 
-                  <button
-                    onClick={() => {
-                      if (confirm('Are you sure you want to cancel this ride?')) {
-                        onUpdateRideStatus(currentAssignedRide.id, 'CANCELLED');
-                      }
-                    }}
-                    className="w-full py-2 bg-red-50 hover:bg-red-100 text-red-600 font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5"
-                  >
-                    <XCircle className="w-3.5 h-3.5" />
-                    Cancel Ride
-                  </button>
+                  {confirmCancelRideId === currentAssignedRide.id ? (
+                    <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs space-y-2">
+                      <p className="font-bold text-red-900">Are you sure you want to cancel this ride?</p>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          disabled={isSubmittingAction}
+                          onClick={async () => {
+                            setActionNotice(null);
+                            setIsSubmittingAction(true);
+                            try {
+                              const res = await onUpdateRideStatus(currentAssignedRide.id, 'CANCELLED');
+                              if (res && res.ok === false) {
+                                setActionNotice({ type: 'err', text: res.error || 'Could not cancel ride.' });
+                                return;
+                              }
+                              setConfirmCancelRideId(null);
+                            } finally {
+                              setIsSubmittingAction(false);
+                            }
+                          }}
+                          className="flex-1 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold rounded-lg"
+                        >
+                          {isSubmittingAction ? 'Cancelling...' : 'Yes, Cancel Ride'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isSubmittingAction}
+                          onClick={() => setConfirmCancelRideId(null)}
+                          className="flex-1 py-2 bg-white border border-gray-200 text-gray-700 font-bold rounded-lg"
+                        >
+                          Keep Trip
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmCancelRideId(currentAssignedRide.id)}
+                      className="w-full py-2 bg-red-50 hover:bg-red-100 text-red-600 font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                      Cancel Ride
+                    </button>
+                  )}
                 </div>
               </div>
             ) : (

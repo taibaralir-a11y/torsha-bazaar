@@ -1,6 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { RIDE_OPTIONS, LOCATIONS } from '../data/mockData';
-import { RideOption, RideBooking, FareOffer, VehicleType } from '../types';
+import {
+  RideOption,
+  RideBooking,
+  FareOffer,
+  VehicleType,
+  Driver,
+  PublicDriverCard,
+  UniversalRoutingConfig,
+  PartnerAccount,
+  LocalityInfo
+} from '../types';
+import {
+  evaluateRideDriverEligibility,
+  evaluatePublicDriverCardsForRide,
+  getDistanceBetween,
+  resolveAreaKey
+} from '../utils/hyperlocalRouting';
 import { 
   ArrowLeft, 
   MapPin, 
@@ -23,19 +39,30 @@ import {
   ChevronRight
 } from 'lucide-react';
 
+interface RideActionResult {
+  ok: boolean;
+  backendRequired?: boolean;
+  error?: string;
+}
+
 interface RideBookingViewProps {
   initialVehicleType?: VehicleType;
   currentLocation: string;
   onBackToHome: () => void;
-  onBookRide?: (booking: RideBooking) => void;
+  onBookRide?: (booking: RideBooking) => Promise<RideActionResult | void> | void;
   rideBookings?: RideBooking[];
-  onCustomerAcceptRiderOffer?: (bookingId: string, offerId: string) => void;
-  onCustomerRejectOffer?: (bookingId: string, offerId: string) => void;
-  onCustomerCounterOffer?: (bookingId: string, newAmount: number) => void;
-  onCancelRide?: (bookingId: string) => void;
+  onCustomerAcceptRiderOffer?: (bookingId: string, offerId: string) => Promise<RideActionResult | void> | void;
+  onCustomerRejectOffer?: (bookingId: string, offerId: string) => Promise<RideActionResult | void> | void;
+  onCustomerCounterOffer?: (bookingId: string, newAmount: number) => Promise<RideActionResult | void> | void;
+  onCancelRide?: (bookingId: string) => Promise<RideActionResult | void> | void;
   customerId?: string;
   customerName?: string;
   customerPhone?: string;
+  drivers?: Driver[];
+  approvedDrivers?: PublicDriverCard[];
+  routingConfig?: UniversalRoutingConfig;
+  partnerAccounts?: PartnerAccount[];
+  localities?: LocalityInfo[];
 }
 
 export const RideBookingView: React.FC<RideBookingViewProps> = ({
@@ -50,18 +77,75 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
   onCancelRide,
   customerId,
   customerName = 'Customer',
-  customerPhone = ''
+  customerPhone = '',
+  drivers = [],
+  approvedDrivers = [],
+  routingConfig,
+  partnerAccounts = [],
+  localities
 }) => {
   const [selectedVehicle, setSelectedVehicle] = useState<VehicleType>(initialVehicleType);
-  const [pickup, setPickup] = useState(currentLocation || 'Kalchini');
+  const [pickup, setPickup] = useState(currentLocation || 'Hasimara');
   const [pickupLandmark, setPickupLandmark] = useState('');
   const [drop, setDrop] = useState('Kalchini Market');
   const [dropLandmark, setDropLandmark] = useState('');
   const [customerActiveBookingId, setCustomerActiveBookingId] = useState<string | null>(null);
+  const [rideActionError, setRideActionError] = useState<string | null>(null);
+  const [confirmCancelRideId, setConfirmCancelRideId] = useState<string | null>(null);
+  const [isSubmittingRide, setIsSubmittingRide] = useState(false);
 
-  // Suggested guidance calculation based on route and vehicle
+  const pickupArea = resolveAreaKey(pickup, localities);
+  const dropArea = resolveAreaKey(drop, localities);
+
+  const eligibleLocalDrivers = useMemo(() => {
+    if (drivers.length > 0) {
+      if (!routingConfig) {
+        return drivers.filter(
+          (d) =>
+            d.status === 'approved' &&
+            d.isOnline &&
+            d.vehicleType === selectedVehicle &&
+            resolveAreaKey(d.currentLocation || d.locality || '', localities) === pickupArea
+        );
+      }
+      return drivers.filter(
+        (d) =>
+          evaluateRideDriverEligibility(
+            pickupArea,
+            selectedVehicle,
+            d,
+            routingConfig,
+            partnerAccounts,
+            localities
+          ).isEligible
+      );
+    }
+
+    if (!routingConfig) {
+      return approvedDrivers.filter(
+        (d) =>
+          d.status === 'approved' &&
+          d.accountStatus !== 'suspended' &&
+          d.isOnline &&
+          d.vehicleType === selectedVehicle &&
+          resolveAreaKey(d.currentLocation || d.locality || '', localities) === pickupArea
+      );
+    }
+
+    return evaluatePublicDriverCardsForRide({
+      pickupLocality: pickupArea,
+      requestedVehicleType: selectedVehicle,
+      config: routingConfig,
+      approvedDrivers,
+      partnerAccounts,
+      localities
+    }).eligible;
+  }, [drivers, approvedDrivers, routingConfig, selectedVehicle, pickupArea, partnerAccounts, localities]);
+
+  // Suggested guidance calculation based on real coordinates/distance matrix and vehicle
   const selectedOption: RideOption = RIDE_OPTIONS.find((r) => r.id === selectedVehicle) || RIDE_OPTIONS[0];
-  const estimatedKm = pickup === drop ? 1.5 : 3.8;
+  const computedDistance = getDistanceBetween(pickup, drop, localities);
+  const estimatedKm = computedDistance > 0 ? computedDistance : 1.5;
   const suggestedFare = Math.round(selectedOption.baseFare + estimatedKm * selectedOption.perKm);
 
   // Proposed fare state (Customer side "Set Your Own Fare")
@@ -109,7 +193,9 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
   }, [liveBooking?.status, liveBooking?.id]);
 
   // Submit initial ride booking with Customer's proposed fare
-  const handleInitiateRideRequest = () => {
+  const handleInitiateRideRequest = async () => {
+    if (isSubmittingRide) return;
+    setRideActionError(null);
     const rideId = `TB-RIDE-${Math.floor(1000 + Math.random() * 9000)}`;
     const finalProposed = Number(proposedFare) > 0 ? Number(proposedFare) : suggestedFare;
 
@@ -130,14 +216,17 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
       customerPhone,
       vehicleType: selectedVehicle,
       pickupLocation: pickup,
+      pickupLocality: pickupArea,
       pickupLandmark: pickupLandmark.trim() || undefined,
       dropLocation: drop,
+      dropLocality: dropArea,
       dropLandmark: dropLandmark.trim() || undefined,
       distanceKm: estimatedKm,
       estimatedFare: suggestedFare,
       suggestedFare,
       customerProposedFare: finalProposed,
       status: 'OFFER_SENT',
+      routingStatus: eligibleLocalDrivers.length > 0 ? 'pending_admin_routing' : 'unavailable_in_locality',
       negotiationHistory: [initialOffer],
       activeDriverOffers: [],
       currentRound: 1,
@@ -145,9 +234,21 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
       createdAt: new Date().toISOString()
     };
 
-    setCustomerActiveBookingId(rideId);
-    if (onBookRide) {
-      onBookRide(newBooking);
+    if (!onBookRide) {
+      setCustomerActiveBookingId(rideId);
+      return;
+    }
+
+    setIsSubmittingRide(true);
+    try {
+      const res = await onBookRide(newBooking);
+      if (res && res.ok === false) {
+        setRideActionError(res.error || 'Could not submit ride booking. Please try again.');
+        return;
+      }
+      setCustomerActiveBookingId(rideId);
+    } finally {
+      setIsSubmittingRide(false);
     }
   };
 
@@ -191,6 +292,21 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
       </div>
 
       <div className="p-4 space-y-4">
+        {rideActionError && (
+          <div className="bg-rose-50 border border-rose-200 text-rose-900 rounded-2xl p-3 text-xs font-semibold flex items-start justify-between gap-2">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <span>{rideActionError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRideActionError(null)}
+              className="text-rose-500 hover:text-rose-700 font-bold"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {/* CASE 1: MUTUALLY CONFIRMED RIDE */}
         {isConfirmed && liveBooking ? (
           <div className="bg-white rounded-2xl border-2 border-emerald-500 p-5 shadow-md space-y-4">
@@ -307,17 +423,53 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
               </span>
             </div>
 
-            <button
-              onClick={() => {
-                if (confirm('Cancel this ride booking?')) {
-                  if (onCancelRide) onCancelRide(liveBooking.id);
-                  setCustomerActiveBookingId(null);
-                }
-              }}
-              className="w-full py-2.5 text-xs text-gray-600 hover:text-red-600 font-semibold text-center hover:bg-red-50 rounded-xl transition-colors"
-            >
-              Cancel Ride
-            </button>
+            {confirmCancelRideId === liveBooking.id ? (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs space-y-2">
+                <p className="font-bold text-red-900">Cancel this ride booking?</p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={isSubmittingRide}
+                    onClick={async () => {
+                      setRideActionError(null);
+                      if (onCancelRide) {
+                        setIsSubmittingRide(true);
+                        try {
+                          const res = await onCancelRide(liveBooking.id);
+                          if (res && res.ok === false) {
+                            setRideActionError(res.error || 'Unable to cancel ride booking.');
+                            return;
+                          }
+                        } finally {
+                          setIsSubmittingRide(false);
+                        }
+                      }
+                      setConfirmCancelRideId(null);
+                      setCustomerActiveBookingId(null);
+                    }}
+                    className="flex-1 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold rounded-lg"
+                  >
+                    {isSubmittingRide ? 'Cancelling...' : 'Yes, Cancel Ride'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSubmittingRide}
+                    onClick={() => setConfirmCancelRideId(null)}
+                    className="flex-1 py-2 bg-white border border-gray-200 text-gray-700 font-bold rounded-lg"
+                  >
+                    Keep Ride
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmCancelRideId(liveBooking.id)}
+                className="w-full py-2.5 text-xs text-gray-600 hover:text-red-600 font-semibold text-center hover:bg-red-50 rounded-xl transition-colors"
+              >
+                Cancel Ride
+              </button>
+            )}
           </div>
         ) : isNegotiating && liveBooking ? (
           /* CASE 2: LIVE NEGOTIATION / COUNTER OFFER SCREEN */
@@ -326,7 +478,11 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
               <div className="flex items-center gap-2">
                 <span className="w-3 h-3 rounded-full bg-amber-500 animate-ping" />
                 <h3 className="font-bold text-gray-900 text-sm">
-                  {liveBooking.status === 'COUNTER_OFFERED' ? 'Rider Sent Counter Offer!' : 'Broadcasting Fare to Nearby Drivers...'}
+                  {liveBooking.status === 'COUNTER_OFFERED'
+                    ? 'Local Driver Sent Counter Offer!'
+                    : liveBooking.routingStatus === 'unavailable_in_locality'
+                      ? `Pending Local ${liveBooking.vehicleType.toUpperCase()} Availability in ${liveBooking.pickupLocality || pickupArea}`
+                      : `Routing to Approved ${liveBooking.vehicleType.toUpperCase()} Drivers in ${liveBooking.pickupLocality || pickupArea}...`}
                 </h3>
               </div>
               <div className="flex items-center gap-1 text-xs font-mono font-bold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-full">
@@ -378,12 +534,22 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
                 <div className="grid grid-cols-3 gap-2 pt-1">
                   {/* Action 1: Accept Rider's Counter Offer */}
                   <button
-                    onClick={() => {
-                      if (onCustomerAcceptRiderOffer) {
-                        onCustomerAcceptRiderOffer(liveBooking.id, latestDriverOffer.id);
+                    type="button"
+                    disabled={isSubmittingRide}
+                    onClick={async () => {
+                      if (!onCustomerAcceptRiderOffer) return;
+                      setRideActionError(null);
+                      setIsSubmittingRide(true);
+                      try {
+                        const res = await onCustomerAcceptRiderOffer(liveBooking.id, latestDriverOffer.id);
+                        if (res && res.ok === false) {
+                          setRideActionError(res.error || 'Accepting a driver offer requires backend support.');
+                        }
+                      } finally {
+                        setIsSubmittingRide(false);
                       }
                     }}
-                    className="py-2.5 px-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs flex flex-col items-center justify-center gap-1 shadow-sm transition-transform active:scale-95"
+                    className="py-2.5 px-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex flex-col items-center justify-center gap-1 shadow-sm transition-transform active:scale-95"
                   >
                     <Check className="w-4 h-4 text-white" />
                     <span>Accept ₹{latestDriverOffer.amount}</span>
@@ -391,6 +557,8 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
 
                   {/* Action 2: Counter Back with another price */}
                   <button
+                    type="button"
+                    disabled={isSubmittingRide}
                     onClick={() => {
                       setActiveNegotiatingOffer(latestDriverOffer);
                       setCustomerCounterAmount(
@@ -398,7 +566,7 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
                       );
                       setShowCounterModal(true);
                     }}
-                    className="py-2.5 px-2 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-xl text-xs flex flex-col items-center justify-center gap-1 shadow-sm transition-transform active:scale-95"
+                    className="py-2.5 px-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex flex-col items-center justify-center gap-1 shadow-sm transition-transform active:scale-95"
                   >
                     <RefreshCw className="w-4 h-4 text-white" />
                     <span>Counter Back</span>
@@ -406,12 +574,22 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
 
                   {/* Action 3: Decline / Reject */}
                   <button
-                    onClick={() => {
-                      if (onCustomerRejectOffer) {
-                        onCustomerRejectOffer(liveBooking.id, latestDriverOffer.id);
+                    type="button"
+                    disabled={isSubmittingRide}
+                    onClick={async () => {
+                      if (!onCustomerRejectOffer) return;
+                      setRideActionError(null);
+                      setIsSubmittingRide(true);
+                      try {
+                        const res = await onCustomerRejectOffer(liveBooking.id, latestDriverOffer.id);
+                        if (res && res.ok === false) {
+                          setRideActionError(res.error || 'Declining a driver offer requires backend support.');
+                        }
+                      } finally {
+                        setIsSubmittingRide(false);
                       }
                     }}
-                    className="py-2.5 px-2 bg-gray-100 hover:bg-red-50 text-gray-700 hover:text-red-700 font-bold rounded-xl text-xs flex flex-col items-center justify-center gap-1 transition-colors"
+                    className="py-2.5 px-2 bg-gray-100 hover:bg-red-50 disabled:opacity-50 text-gray-700 hover:text-red-700 font-bold rounded-xl text-xs flex flex-col items-center justify-center gap-1 transition-colors"
                   >
                     <X className="w-4 h-4 text-gray-600" />
                     <span>Decline</span>
@@ -424,9 +602,13 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
             {!latestDriverOffer && (
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-center space-y-2">
                 <RefreshCw className="w-6 h-6 text-amber-600 animate-spin mx-auto" />
-                <p className="text-xs font-bold text-gray-800">Searching eligible riders in {liveBooking.pickupLocation}...</p>
+                <p className="text-xs font-bold text-gray-800">
+                  {eligibleLocalDrivers.length > 0
+                    ? `Checking ${eligibleLocalDrivers.length} eligible ${liveBooking.vehicleType.toUpperCase()} partner(s) in ${liveBooking.pickupLocality || pickupArea}...`
+                    : `No eligible ${liveBooking.vehicleType.toUpperCase()} driver currently online in ${liveBooking.pickupLocality || pickupArea} — Request kept Pending & Admin Notified.`}
+                </p>
                 <p className="text-[11px] text-gray-500">
-                  Drivers will review your offer of ₹{liveBooking.customerProposedFare}. They can accept instantly or propose a counter fare.
+                  Per locality routing rules, requests are only shown to Admin-approved drivers serving your pickup locality (Offer: ₹{liveBooking.customerProposedFare}).
                 </p>
               </div>
             )}
@@ -454,13 +636,27 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
             )}
 
             <button
-              onClick={() => {
-                if (onCancelRide) onCancelRide(liveBooking.id);
+              type="button"
+              disabled={isSubmittingRide}
+              onClick={async () => {
+                setRideActionError(null);
+                if (onCancelRide) {
+                  setIsSubmittingRide(true);
+                  try {
+                    const res = await onCancelRide(liveBooking.id);
+                    if (res && res.ok === false) {
+                      setRideActionError(res.error || 'Unable to cancel ride request.');
+                      return;
+                    }
+                  } finally {
+                    setIsSubmittingRide(false);
+                  }
+                }
                 setCustomerActiveBookingId(null);
               }}
-              className="w-full py-2.5 text-xs text-red-600 font-semibold hover:bg-red-50 rounded-xl transition-colors"
+              className="w-full py-2.5 text-xs text-red-600 font-semibold hover:bg-red-50 disabled:opacity-50 rounded-xl transition-colors"
             >
-              Cancel Ride Request
+              {isSubmittingRide ? 'Cancelling Request...' : 'Cancel Ride Request'}
             </button>
           </div>
         ) : (
@@ -656,10 +852,18 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
               </div>
             </div>
 
-            {/* Trust badge */}
-            <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-100 rounded-xl p-3 text-xs text-emerald-900">
-              <Shield className="w-4 h-4 text-emerald-700 shrink-0" />
-              <span>Zero cancellation penalties. Ride is confirmed only when both you and driver agree on price.</span>
+            {/* Locality Driver Eligibility Notice */}
+            <div className={`flex items-center gap-2 rounded-xl p-3 text-xs border ${
+              eligibleLocalDrivers.length > 0
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                : 'bg-amber-50 border-amber-200 text-amber-900'
+            }`}>
+              <Shield className="w-4 h-4 shrink-0" />
+              <span>
+                {eligibleLocalDrivers.length > 0
+                  ? `${eligibleLocalDrivers.length} verified ${selectedVehicle.toUpperCase()} driver(s) currently online in ${pickupArea}. Ride is confirmed only when both agree.`
+                  : `No ${selectedVehicle.toUpperCase()} driver is currently online in ${pickupArea}. You can still submit — request will remain pending for Admin locality routing without random cross-town broadcast.`}
+              </span>
             </div>
 
             {/* Action Button: Submit Fare Request */}
@@ -668,7 +872,7 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
               className="w-full bg-[#0E7438] hover:bg-emerald-800 text-white font-bold py-3.5 px-4 rounded-2xl shadow-md text-sm active:scale-95 transition-all flex items-center justify-center gap-2"
             >
               <Send className="w-4 h-4" />
-              <span>Send Request to Nearby {selectedOption.name.split(' ')[0]}s</span>
+              <span>Request Approved {selectedOption.name.split(' ')[0]} in {pickupArea}</span>
               <span className="text-yellow-300 font-extrabold">• ₹{proposedFare}</span>
             </button>
           </>
@@ -733,16 +937,27 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
+                disabled={isSubmittingRide}
+                onClick={async () => {
                   if (liveBooking && onCustomerCounterOffer) {
-                    onCustomerCounterOffer(liveBooking.id, customerCounterAmount);
+                    setRideActionError(null);
+                    setIsSubmittingRide(true);
+                    try {
+                      const res = await onCustomerCounterOffer(liveBooking.id, customerCounterAmount);
+                      if (res && res.ok === false) {
+                        setRideActionError(res.error || 'Unable to send counter offer.');
+                        return;
+                      }
+                    } finally {
+                      setIsSubmittingRide(false);
+                    }
                   }
                   setShowCounterModal(false);
                 }}
-                className="flex-1 py-2.5 bg-[#0E7438] hover:bg-emerald-800 text-white font-bold rounded-xl text-xs shadow-sm flex items-center justify-center gap-1.5"
+                className="flex-1 py-2.5 bg-[#0E7438] hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-xs shadow-sm flex items-center justify-center gap-1.5"
               >
                 <Send className="w-3.5 h-3.5" />
-                <span>Send Counter (₹{customerCounterAmount})</span>
+                <span>{isSubmittingRide ? 'Sending...' : `Send Counter (₹${customerCounterAmount})`}</span>
               </button>
             </div>
           </div>

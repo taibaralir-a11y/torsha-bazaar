@@ -1,20 +1,152 @@
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps } from 'firebase/app';
 import { 
   getAuth, 
   signInAnonymously, 
   signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  deleteUser,
+  sendPasswordResetEmail,
+  setPersistence,
+  inMemoryPersistence,
   GoogleAuthProvider,
   signInWithPopup,
   onAuthStateChanged, 
   signOut, 
   User 
 } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer, setDoc, updateDoc, SetOptions, DocumentReference } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, getDocFromServer, setDoc, updateDoc, SetOptions, DocumentReference } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
+import { normalizePhoneE164 } from './utils/phone';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
+
+// Secondary isolated Firebase Auth instance for Super Admin partner account provisioning
+// Uses inMemoryPersistence and immediately signs out so the Super Admin session is never disrupted.
+const PROVISION_APP_NAME = 'adminAccountProvisioner';
+const provisionApp =
+  getApps().find((a) => a.name === PROVISION_APP_NAME) ||
+  initializeApp(firebaseConfig, PROVISION_APP_NAME);
+const provisionAuth = getAuth(provisionApp);
+
+export function buildSyntheticPartnerEmail(phone: string): string {
+  const normalized = normalizePhoneE164(phone) || phone.trim();
+  const digits = normalized.replace(/\D/g, '');
+  return `partner.${digits}@login.torshabazaar.in`;
+}
+
+export async function hashPhoneForLookup(phone: string): Promise<string> {
+  const canonical = normalizePhoneE164(phone) || phone.replace(/\D/g, '');
+  const encoder = new TextEncoder();
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(canonical));
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export async function createPartnerAuthAccount(
+  email: string,
+  password: string,
+  options?: { sendResetEmail?: boolean }
+): Promise<{ uid: string; email: string; resetEmailSent: boolean }> {
+  const cleanEmail = email.trim().toLowerCase();
+  await setPersistence(provisionAuth, inMemoryPersistence);
+  let resetEmailSent = false;
+  try {
+    const cred = await createUserWithEmailAndPassword(provisionAuth, cleanEmail, password);
+    if (options?.sendResetEmail && !cleanEmail.endsWith('@login.torshabazaar.in')) {
+      try {
+        await sendPasswordResetEmail(provisionAuth, cleanEmail);
+        resetEmailSent = true;
+      } catch (resetErr) {
+        console.warn('Password reset email dispatch notice:', (resetErr as Error)?.message);
+      }
+    }
+    return {
+      uid: cred.user.uid,
+      email: cred.user.email || cleanEmail,
+      resetEmailSent
+    };
+  } finally {
+    await signOut(provisionAuth).catch(() => {});
+  }
+}
+
+/**
+ * Provisions a new Partner Firebase Auth user and immediately executes the
+ * accompanying Firestore write callback while the provisioned user is still
+ * signed in on the isolated secondary Auth instance. Best-effort client
+ * rollback attempts to delete the newly created Auth user if Firestore fails
+ * (cannot protect against abrupt browser crashes/tab closes without a trusted backend).
+ */
+export async function provisionPartnerAuthWithFirestore<T>(
+  email: string,
+  password: string,
+  options: { sendResetEmail?: boolean } | undefined,
+  onProvisioned: (created: { uid: string; email: string }) => Promise<T>
+): Promise<{ result: T; resetEmailSent: boolean }> {
+  const cleanEmail = email.trim().toLowerCase();
+  await setPersistence(provisionAuth, inMemoryPersistence);
+  const cred = await createUserWithEmailAndPassword(provisionAuth, cleanEmail, password);
+  let resetEmailSent = false;
+  try {
+    const result = await onProvisioned({
+      uid: cred.user.uid,
+      email: cred.user.email || cleanEmail
+    });
+    if (options?.sendResetEmail && !cleanEmail.endsWith('@login.torshabazaar.in')) {
+      try {
+        await sendPasswordResetEmail(provisionAuth, cleanEmail);
+        resetEmailSent = true;
+      } catch (resetErr) {
+        console.warn('Password reset email dispatch notice:', (resetErr as Error)?.message);
+      }
+    }
+    return { result, resetEmailSent };
+  } catch (err) {
+    let rollbackFailed = false;
+    try {
+      await deleteUser(cred.user);
+    } catch (delErr) {
+      rollbackFailed = true;
+      console.warn('Rollback deleteUser failed:', (delErr as Error)?.message);
+    }
+    if (rollbackFailed) {
+      const baseMsg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `${baseMsg} (Warning: Automatic Auth rollback for ${cleanEmail} [uid: ${cred.user.uid}] could not complete; remove or link the Auth user manually in Firebase Auth console.)`
+      );
+    }
+    throw err;
+  } finally {
+    await signOut(provisionAuth).catch(() => {});
+  }
+}
+
+export async function resolvePartnerLoginEmail(identifier: string): Promise<string> {
+  const trimmed = identifier.trim();
+  if (trimmed.includes('@')) {
+    return trimmed.toLowerCase();
+  }
+  const normalizedPhone = normalizePhoneE164(trimmed);
+  if (!normalizedPhone) {
+    throw new Error('Please enter a valid email address or 10-digit mobile number.');
+  }
+  try {
+    const phoneHash = await hashPhoneForLookup(normalizedPhone);
+    const snap = await getDoc(doc(db, 'phoneAuthLookup', phoneHash));
+    if (snap.exists()) {
+      const data = snap.data() as { loginEmail?: string };
+      if (data?.loginEmail) {
+        return data.loginEmail.toLowerCase();
+      }
+    }
+  } catch (err) {
+    console.warn('Phone auth lookup notice:', (err as Error)?.message);
+  }
+  return buildSyntheticPartnerEmail(normalizedPhone);
+}
 
 const LOGOUT_FLAG_KEY = 'tb_explicit_logout';
 let inFlightAuthPromise: Promise<User | null> | null = null;
@@ -96,33 +228,13 @@ export async function handleAuthSignOut(): Promise<void> {
   }
 }
 
-export { onAuthStateChanged, signInWithEmailAndPassword, GoogleAuthProvider, signInWithPopup };
+export { onAuthStateChanged, signInWithEmailAndPassword, sendPasswordResetEmail, GoogleAuthProvider, signInWithPopup };
 
 // Automatically bootstrap/restore session on load
 ensureAuthSession(false).catch(() => {});
 
-/**
- * Strips undefined properties recursively so Firestore setDoc never throws:
- * "Unsupported field value: undefined"
- */
-export function cleanForFirestore<T>(data: T): T {
-  if (data === null || data === undefined) {
-    return null as any;
-  }
-  if (Array.isArray(data)) {
-    return data.map(item => cleanForFirestore(item)) as any;
-  }
-  if (typeof data === 'object' && !(data instanceof Date)) {
-    const cleaned: any = {};
-    for (const [key, value] of Object.entries(data as Record<string, any>)) {
-      if (value !== undefined) {
-        cleaned[key] = cleanForFirestore(value);
-      }
-    }
-    return cleaned;
-  }
-  return data;
-}
+import { cleanForFirestore } from './utils/firestoreClean';
+export { cleanForFirestore };
 
 /**
  * Safe wrapper for Firestore setDoc that automatically cleans out undefined fields

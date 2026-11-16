@@ -14,41 +14,91 @@ import {
   Package,
   Navigation,
   ShieldCheck,
-  Star
+  Star,
+  LogOut
 } from 'lucide-react';
-import { DeliveryPerson, DeliveryRequest, DeliveryStatus, Order, OrderStatus } from '../../types';
+import {
+  DeliveryPerson,
+  DeliveryRequest,
+  DeliveryStatus,
+  Order,
+  OrderStatus,
+  PartnerAccount,
+  UniversalRoutingConfig
+} from '../../types';
+import {
+  evaluateDeliveryRiderEligibility,
+  resolveAreaKey
+} from '../../utils/hyperlocalRouting';
+
+interface DeliveryActionResult {
+  ok: boolean;
+  backendRequired?: boolean;
+  error?: string;
+}
 
 interface DeliveryDashboardProps {
   rider: DeliveryPerson;
   deliveries: DeliveryRequest[];
   assignedOrders?: Order[];
+  routingConfig?: UniversalRoutingConfig;
+  partnerAccounts?: PartnerAccount[];
   onSwitchPortal: () => void;
   onUpdateRider: (updated: Partial<DeliveryPerson>) => void;
-  onUpdateDeliveryStatus: (deliveryId: string, status: DeliveryStatus) => void;
-  onAcceptDelivery: (deliveryId: string, riderId: string, riderName: string, riderPhone: string) => void;
+  onUpdateDeliveryStatus: (deliveryId: string, status: DeliveryStatus) => Promise<DeliveryActionResult | void> | void;
+  onAcceptDelivery: (
+    deliveryId: string,
+    riderId: string,
+    riderName: string,
+    riderPhone: string
+  ) => Promise<DeliveryActionResult | void> | void;
   onUpdateOrderStatus?: (orderId: string, status: OrderStatus) => void;
+  onLogout?: () => void;
 }
 
 export const DeliveryDashboard: React.FC<DeliveryDashboardProps> = ({
   rider,
   deliveries,
   assignedOrders = [],
+  routingConfig,
+  partnerAccounts = [],
   onSwitchPortal,
   onUpdateRider,
   onUpdateDeliveryStatus,
   onAcceptDelivery,
   onUpdateOrderStatus,
+  onLogout,
 }) => {
   const [activeTab, setActiveTab] = useState<'available' | 'active' | 'history' | 'profile'>('available');
   const [showEditModal, setShowEditModal] = useState(false);
   const [editName, setEditName] = useState(rider.name);
   const [editPhone, setEditPhone] = useState(rider.phone);
   const [editLocality, setEditLocality] = useState(rider.locality);
+  const [actionNotice, setActionNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [confirmFailDeliveryId, setConfirmFailDeliveryId] = useState<string | null>(null);
 
-  // Available parcel assignments
-  const availableDeliveries = deliveries.filter(
-    (d) => d.status === 'pending_assignment' || (d.status === 'assigned' && d.assignedDeliveryPersonId === rider.id)
-  );
+  // Available parcel assignments strictly filtered by Admin locality routing
+  const availableDeliveries = deliveries.filter((d) => {
+    if (d.status === 'assigned' && d.assignedDeliveryPersonId === rider.id) {
+      return true;
+    }
+    if (d.status !== 'pending_assignment') return false;
+    const pickupLoc = d.pickupLocality || d.senderAddress;
+    if (routingConfig) {
+      return evaluateDeliveryRiderEligibility(
+        pickupLoc,
+        rider,
+        routingConfig,
+        partnerAccounts
+      ).isEligible;
+    }
+    return (
+      rider.status === 'approved' &&
+      rider.isOnline &&
+      resolveAreaKey(pickupLoc) === resolveAreaKey(rider.currentLocation || rider.locality)
+    );
+  });
 
   // Active parcel being fulfilled
   const activeDelivery = deliveries.find(
@@ -109,18 +159,30 @@ export const DeliveryDashboard: React.FC<DeliveryDashboardProps> = ({
             </div>
           </div>
 
-          {/* Online/Offline Toggle */}
-          <button
-            onClick={() => onUpdateRider({ isOnline: !rider.isOnline })}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm ${
-              rider.isOnline
-                ? 'bg-emerald-500 text-white shadow-emerald-900/40 ring-2 ring-emerald-300'
-                : 'bg-slate-700 text-slate-300'
-            }`}
-          >
-            <Power className="w-3.5 h-3.5" />
-            {rider.isOnline ? 'ONLINE' : 'OFFLINE'}
-          </button>
+          <div className="flex items-center gap-1.5">
+            {/* Online/Offline Toggle */}
+            <button
+              onClick={() => onUpdateRider({ isOnline: !rider.isOnline })}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm ${
+                rider.isOnline
+                  ? 'bg-emerald-500 text-white shadow-emerald-900/40 ring-2 ring-emerald-300'
+                  : 'bg-slate-700 text-slate-300'
+              }`}
+            >
+              <Power className="w-3.5 h-3.5" />
+              {rider.isOnline ? 'ONLINE' : 'OFFLINE'}
+            </button>
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                title="Sign Out"
+                className="p-1.5 bg-rose-700/80 hover:bg-rose-700 text-white rounded-lg transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Rider Badge */}
@@ -224,6 +286,27 @@ export const DeliveryDashboard: React.FC<DeliveryDashboardProps> = ({
 
       {/* Main Content */}
       <div className="p-4 space-y-4 flex-1">
+        {actionNotice && (
+          <div
+            className={`rounded-2xl p-3 text-xs font-semibold flex items-start justify-between gap-2 border ${
+              actionNotice.type === 'err'
+                ? 'bg-rose-50 border-rose-200 text-rose-900'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{actionNotice.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionNotice(null)}
+              className="font-bold opacity-70 hover:opacity-100"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {/* TAB 1: AVAILABLE ASSIGNMENTS */}
         {activeTab === 'available' && (
           <div className="space-y-3">
@@ -298,10 +381,24 @@ export const DeliveryDashboard: React.FC<DeliveryDashboardProps> = ({
                   </div>
 
                   <button
-                    disabled={!isApproved || !rider.isOnline}
-                    onClick={() => {
-                      onAcceptDelivery(delivery.id, rider.id, rider.name, rider.phone);
-                      setActiveTab('active');
+                    type="button"
+                    disabled={!isApproved || !rider.isOnline || isBusy}
+                    onClick={async () => {
+                      setActionNotice(null);
+                      setIsBusy(true);
+                      try {
+                        const res = await onAcceptDelivery(delivery.id, rider.id, rider.name, rider.phone);
+                        if (res && res.ok === false) {
+                          setActionNotice({
+                            type: 'err',
+                            text: res.error || 'Delivery acceptance requires backend Cloud Functions dispatch.'
+                          });
+                          return;
+                        }
+                        setActiveTab('active');
+                      } finally {
+                        setIsBusy(false);
+                      }
                     }}
                     className="w-full py-2.5 bg-sky-600 hover:bg-sky-700 disabled:bg-gray-300 text-white font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm"
                   >
@@ -411,8 +508,19 @@ export const DeliveryDashboard: React.FC<DeliveryDashboardProps> = ({
                   <label className="text-xs font-bold text-gray-700 block">Delivery Stage:</label>
                   <div className="grid grid-cols-2 gap-2">
                     <button
-                      onClick={() => onUpdateDeliveryStatus(activeDelivery.id, 'picked_up')}
-                      className={`p-2.5 rounded-xl text-xs font-bold border transition-all ${
+                      type="button"
+                      disabled={isBusy}
+                      onClick={async () => {
+                        setActionNotice(null);
+                        setIsBusy(true);
+                        try {
+                          const res = await onUpdateDeliveryStatus(activeDelivery.id, 'picked_up');
+                          if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not update delivery stage.' });
+                        } finally {
+                          setIsBusy(false);
+                        }
+                      }}
+                      className={`p-2.5 rounded-xl text-xs font-bold border transition-all disabled:opacity-50 ${
                         activeDelivery.status === 'picked_up'
                           ? 'bg-amber-500 text-white border-amber-600'
                           : 'bg-white text-gray-700 border-gray-200'
@@ -422,8 +530,19 @@ export const DeliveryDashboard: React.FC<DeliveryDashboardProps> = ({
                     </button>
 
                     <button
-                      onClick={() => onUpdateDeliveryStatus(activeDelivery.id, 'on_the_way')}
-                      className={`p-2.5 rounded-xl text-xs font-bold border transition-all ${
+                      type="button"
+                      disabled={isBusy}
+                      onClick={async () => {
+                        setActionNotice(null);
+                        setIsBusy(true);
+                        try {
+                          const res = await onUpdateDeliveryStatus(activeDelivery.id, 'on_the_way');
+                          if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not update delivery stage.' });
+                        } finally {
+                          setIsBusy(false);
+                        }
+                      }}
+                      className={`p-2.5 rounded-xl text-xs font-bold border transition-all disabled:opacity-50 ${
                         activeDelivery.status === 'on_the_way'
                           ? 'bg-blue-600 text-white border-blue-700'
                           : 'bg-white text-gray-700 border-gray-200'
@@ -434,24 +553,69 @@ export const DeliveryDashboard: React.FC<DeliveryDashboardProps> = ({
                   </div>
 
                   <button
-                    onClick={() => onUpdateDeliveryStatus(activeDelivery.id, 'delivered')}
-                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-2 shadow-md mt-2"
+                    type="button"
+                    disabled={isBusy}
+                    onClick={async () => {
+                      setActionNotice(null);
+                      setIsBusy(true);
+                      try {
+                        const res = await onUpdateDeliveryStatus(activeDelivery.id, 'delivered');
+                        if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not mark delivered.' });
+                      } finally {
+                        setIsBusy(false);
+                      }
+                    }}
+                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-2 shadow-md mt-2"
                   >
                     <CheckCircle2 className="w-4 h-4" />
                     Confirm Handed Over & Collect ₹{activeDelivery.estimatedPrice}
                   </button>
 
-                  <button
-                    onClick={() => {
-                      if (confirm('Mark delivery as failed?')) {
-                        onUpdateDeliveryStatus(activeDelivery.id, 'failed');
-                      }
-                    }}
-                    className="w-full py-2 bg-red-50 hover:bg-red-100 text-red-600 font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5"
-                  >
-                    <XCircle className="w-3.5 h-3.5" />
-                    Failed / Receiver Unavailable
-                  </button>
+                  {confirmFailDeliveryId === activeDelivery.id ? (
+                    <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs space-y-2">
+                      <p className="font-bold text-red-900">Mark this parcel delivery as failed?</p>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={async () => {
+                            setActionNotice(null);
+                            setIsBusy(true);
+                            try {
+                              const res = await onUpdateDeliveryStatus(activeDelivery.id, 'failed');
+                              if (res && res.ok === false) {
+                                setActionNotice({ type: 'err', text: res.error || 'Could not mark delivery failed.' });
+                                return;
+                              }
+                              setConfirmFailDeliveryId(null);
+                            } finally {
+                              setIsBusy(false);
+                            }
+                          }}
+                          className="flex-1 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold rounded-lg"
+                        >
+                          {isBusy ? 'Saving...' : 'Yes, Mark Failed'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => setConfirmFailDeliveryId(null)}
+                          className="flex-1 py-2 bg-white border border-gray-200 text-gray-700 font-bold rounded-lg"
+                        >
+                          Keep Active
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmFailDeliveryId(activeDelivery.id)}
+                      className="w-full py-2 bg-red-50 hover:bg-red-100 text-red-600 font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                      Failed / Receiver Unavailable
+                    </button>
+                  )}
                 </div>
               </div>
             ) : activeStoreOrders.length === 0 ? (

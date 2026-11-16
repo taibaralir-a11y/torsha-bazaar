@@ -17,20 +17,37 @@ import {
   ChevronRight,
   UserCheck
 } from 'lucide-react';
-import { ScrapRequest, ScrapOffer, ScrapCategory, UserProfile } from '../../types';
+import { ScrapRequest, ScrapOffer, ScrapCategory, UserProfile, PublicScrapListing } from '../../types';
 import { SCRAP_PRICE_GUIDE } from '../../data/mockData';
 import { SERVICE_LOCALITIES } from '../../utils/hyperlocalRouting';
+
+interface ScrapActionResult {
+  ok: boolean;
+  backendRequired?: boolean;
+  error?: string;
+}
 
 interface ScrapMarketplaceViewProps {
   onBackToHome: () => void;
   user: UserProfile;
   currentLocality: string;
   scrapRequests: ScrapRequest[];
+  publicScrapListings?: PublicScrapListing[];
   isAdmin?: boolean;
-  onAddScrapRequest: (req: ScrapRequest) => void;
-  onSendOffer: (offer: ScrapOffer) => void;
-  onAcceptOffer: (requestId: string, offerId: string, buyerName: string, buyerPhone: string, amount: number) => void;
-  onUpdateScrapStatus: (requestId: string, status: any) => void;
+  isAuthorizedBuyer?: boolean;
+  activeBuyerId?: string;
+  activeBuyerName?: string;
+  onAddScrapRequest: (req: ScrapRequest) => Promise<ScrapActionResult | void> | void;
+  onSendOffer: (offer: ScrapOffer) => Promise<ScrapActionResult | void> | void;
+  onAcceptOffer: (
+    requestId: string,
+    offerId: string,
+    buyerName: string,
+    buyerPhone: string,
+    amount: number,
+    buyerId?: string
+  ) => Promise<ScrapActionResult | void> | void;
+  onUpdateScrapStatus: (requestId: string, status: ScrapRequest['status']) => Promise<ScrapActionResult | void> | void;
 }
 
 export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
@@ -38,13 +55,20 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
   user,
   currentLocality,
   scrapRequests,
+  publicScrapListings = [],
   isAdmin = false,
+  isAuthorizedBuyer = false,
+  activeBuyerId = '',
+  activeBuyerName = '',
   onAddScrapRequest,
   onSendOffer,
   onAcceptOffer,
   onUpdateScrapStatus
 }) => {
-  const [activeTab, setActiveTab] = useState<'sell' | 'my_requests' | 'rates' | 'buyer_portal'>('sell');
+  const canOperateBuyerPortal = isAdmin || isAuthorizedBuyer;
+  const [activeTab, setActiveTab] = useState<'sell' | 'my_requests' | 'rates' | 'buyer_portal'>(
+    canOperateBuyerPortal && !isAdmin ? 'buyer_portal' : 'sell'
+  );
   const [category, setCategory] = useState<ScrapCategory>('iron');
   const [categoryLabel, setCategoryLabel] = useState('Old Construction Iron & Grilles');
   const [estimatedWeight, setEstimatedWeight] = useState('15 - 25 kg');
@@ -55,15 +79,29 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
   const [phone, setPhone] = useState(user.phone || '');
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState(false);
+  const [scrapNotice, setScrapNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [isSubmittingRequest, setIsSubmittingRequest] = useState(false);
+  const [isSubmittingOffer, setIsSubmittingOffer] = useState(false);
+  const [busyRequestId, setBusyRequestId] = useState<string | null>(null);
 
   const myScrapRequests = scrapRequests.filter((r) => Boolean(user.id) && r.customerId === user.id);
 
   // Buyer Portal offer form states
-  const [selectedRequestForOffer, setSelectedRequestForOffer] = useState<ScrapRequest | null>(null);
+  const [selectedRequestForOffer, setSelectedRequestForOffer] = useState<PublicScrapListing | ScrapRequest | null>(null);
   const [offerPricePerKg, setOfferPricePerKg] = useState<number>(30);
   const [offerTotalAmount, setOfferTotalAmount] = useState<number>(600);
   const [offerPickupTime, setOfferPickupTime] = useState('Today within 2 Hours');
   const [offerNotes, setOfferNotes] = useState('Digital scale weighing at your doorstep. Cash or UPI on pickup.');
+
+  const openBuyerListings: (PublicScrapListing | ScrapRequest)[] = isAdmin
+    ? scrapRequests.filter((r) => r.status === 'open' || r.status === 'offers_received')
+    : publicScrapListings.filter((r) => r.status === 'open' || r.status === 'offers_received');
+
+  const assignedBuyerPickups = scrapRequests.filter(
+    (r) =>
+      ['accepted', 'pickup_scheduled', 'picked_up', 'completed'].includes(r.status) &&
+      (isAdmin || (Boolean(activeBuyerId) && r.selectedBuyerId === activeBuyerId))
+  );
 
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -76,8 +114,10 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
     }
   };
 
-  const handleSubmitRequest = (e: React.FormEvent) => {
+  const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingRequest) return;
+    setScrapNotice(null);
     const newRequest: ScrapRequest = {
       id: `SCRAP-${Math.floor(100 + Math.random() * 900)}`,
       customerId: user.id || '',
@@ -96,25 +136,41 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
       createdAt: new Date().toISOString()
     };
 
-    onAddScrapRequest(newRequest);
-    setSuccessNotice(true);
-    setTimeout(() => {
-      setSuccessNotice(false);
-      setActiveTab('my_requests');
-    }, 1500);
+    setIsSubmittingRequest(true);
+    try {
+      const res = await onAddScrapRequest(newRequest);
+      if (res && res.ok === false) {
+        setScrapNotice({ type: 'err', text: res.error || 'Could not post scrap pickup request.' });
+        return;
+      }
+      setSuccessNotice(true);
+      setTimeout(() => {
+        setSuccessNotice(false);
+        setActiveTab('my_requests');
+      }, 1500);
+    } finally {
+      setIsSubmittingRequest(false);
+    }
   };
 
-  const handleBuyerSubmitOffer = (e: React.FormEvent) => {
+  const handleBuyerSubmitOffer = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedRequestForOffer || !isAdmin) return;
+    if (!selectedRequestForOffer || !canOperateBuyerPortal || isSubmittingOffer) return;
+    setScrapNotice(null);
+    const resolvedBuyerId = activeBuyerId || user.id || '';
+    const resolvedBuyerName = activeBuyerName || user.name || 'Verified Kabari Partner';
+    if (!resolvedBuyerId) {
+      setScrapNotice({ type: 'err', text: 'Authenticated Kabari buyer session is required to submit quotes.' });
+      return;
+    }
 
     const offer: ScrapOffer = {
-      id: `off-${Date.now()}`,
+      id: `${selectedRequestForOffer.id}_${resolvedBuyerId}`,
       requestId: selectedRequestForOffer.id,
       scrapRequestId: selectedRequestForOffer.id,
-      buyerId: 'shop-satali-scrap-5',
-      buyerName: 'Satali Kabari & Recyclers',
-      buyerPhone: '+91 98328 44012',
+      buyerId: resolvedBuyerId,
+      buyerName: resolvedBuyerName,
+      buyerPhone: user.phone || '',
       pricePerKg: Number(offerPricePerKg),
       totalOfferAmount: Number(offerTotalAmount),
       pickupTimeEstimate: offerPickupTime,
@@ -123,8 +179,18 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
       createdAt: new Date().toISOString()
     };
 
-    onSendOffer(offer);
-    setSelectedRequestForOffer(null);
+    setIsSubmittingOffer(true);
+    try {
+      const res = await onSendOffer(offer);
+      if (res && res.ok === false) {
+        setScrapNotice({ type: 'err', text: res.error || 'Could not submit purchase quote.' });
+        return;
+      }
+      setSelectedRequestForOffer(null);
+      setScrapNotice({ type: 'ok', text: `Quote submitted for ${selectedRequestForOffer.id}.` });
+    } finally {
+      setIsSubmittingOffer(false);
+    }
   };
 
   return (
@@ -150,7 +216,7 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
         </div>
 
         {/* Navigation Tabs */}
-        <div className="grid grid-cols-4 gap-1 pt-2 border-t border-emerald-700/60 text-[11px] font-bold">
+        <div className={`grid ${canOperateBuyerPortal ? 'grid-cols-4' : 'grid-cols-3'} gap-1 pt-2 border-t border-emerald-700/60 text-[11px] font-bold`}>
           <button
             onClick={() => setActiveTab('sell')}
             className={`py-1.5 rounded-lg text-center transition-all ${
@@ -175,18 +241,41 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
           >
             Mandi Rates
           </button>
-          <button
-            onClick={() => setActiveTab('buyer_portal')}
-            className={`py-1.5 rounded-lg text-center transition-all ${
-              activeTab === 'buyer_portal' ? 'bg-yellow-400 text-gray-950 font-black shadow-xs' : 'text-emerald-100 hover:bg-emerald-700'
-            }`}
-          >
-            Buyer Portal
-          </button>
+          {canOperateBuyerPortal && (
+            <button
+              onClick={() => setActiveTab('buyer_portal')}
+              className={`py-1.5 rounded-lg text-center transition-all ${
+                activeTab === 'buyer_portal' ? 'bg-yellow-400 text-gray-950 font-black shadow-xs' : 'text-emerald-100 hover:bg-emerald-700'
+              }`}
+            >
+              Buyer Portal
+            </button>
+          )}
         </div>
       </div>
 
       <div className="p-4 space-y-4">
+        {scrapNotice && (
+          <div
+            className={`rounded-2xl p-3 text-xs font-semibold flex items-start justify-between gap-2 border ${
+              scrapNotice.type === 'err'
+                ? 'bg-rose-50 border-rose-200 text-rose-900'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{scrapNotice.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setScrapNotice(null)}
+              className="font-bold opacity-70 hover:opacity-100"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {/* TAB 1: SELL SCRAP FORM */}
         {activeTab === 'sell' && (
           <div className="space-y-4">
@@ -348,10 +437,11 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
 
               <button
                 type="submit"
-                className="w-full py-3 bg-emerald-700 hover:bg-emerald-800 text-white font-black rounded-xl text-xs transition-colors flex items-center justify-center gap-2 shadow-md mt-2"
+                disabled={isSubmittingRequest}
+                className="w-full py-3 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-black rounded-xl text-xs transition-colors flex items-center justify-center gap-2 shadow-md mt-2"
               >
                 <Plus className="w-4 h-4" />
-                Submit Scrap Request for Buyer Offers
+                {isSubmittingRequest ? 'Submitting Request...' : 'Submit Scrap Request for Buyer Offers'}
               </button>
             </form>
           </div>
@@ -386,8 +476,21 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
                     <div className="flex items-center gap-2">
                       {req.status === 'open' && (
                         <button
-                          onClick={() => onUpdateScrapStatus(req.id, 'cancelled')}
-                          className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200 hover:bg-red-100"
+                          type="button"
+                          disabled={busyRequestId === req.id}
+                          onClick={async () => {
+                            setScrapNotice(null);
+                            setBusyRequestId(req.id);
+                            try {
+                              const res = await onUpdateScrapStatus(req.id, 'cancelled');
+                              if (res && res.ok === false) {
+                                setScrapNotice({ type: 'err', text: res.error || 'Could not cancel request.' });
+                              }
+                            } finally {
+                              setBusyRequestId(null);
+                            }
+                          }}
+                          className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 disabled:opacity-50"
                         >
                           Cancel Request
                         </button>
@@ -431,7 +534,7 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
 
                     {(!req.offers || req.offers.length === 0) ? (
                       <p className="text-[11px] text-gray-500 bg-slate-50 p-2 rounded-lg">
-                        Request saved securely. Verified Kabari buyer matching & live quotes require Cloud Functions dispatch (BACKEND REQUIRED).
+                        Request saved securely. Verified Kabari buyer matching & live quotes will appear once buyers submit quotes.
                       </p>
                     ) : (
                       req.offers.map((offer) => (
@@ -446,7 +549,9 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
                           <div className="flex items-center justify-between">
                             <div>
                               <strong className="text-gray-900">{offer.buyerName}</strong>
-                              <p className="text-[10px] text-gray-500 font-mono">{offer.buyerPhone}</p>
+                              {offer.buyerPhone && (
+                                <p className="text-[10px] text-gray-500 font-mono">{offer.buyerPhone}</p>
+                              )}
                             </div>
                             <div className="text-right">
                               <span className="text-sm font-black text-emerald-700">₹{offer.totalOfferAmount}</span>
@@ -470,8 +575,28 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
                               </span>
                             ) : (
                               <button
-                                disabled={!isAdmin}
-                                onClick={() => isAdmin && onAcceptOffer(req.id, offer.id, offer.buyerName, offer.buyerPhone, offer.totalOfferAmount)}
+                                type="button"
+                                disabled={!isAdmin || busyRequestId === req.id}
+                                onClick={async () => {
+                                  if (!isAdmin) return;
+                                  setScrapNotice(null);
+                                  setBusyRequestId(req.id);
+                                  try {
+                                    const res = await onAcceptOffer(
+                                      req.id,
+                                      offer.id,
+                                      offer.buyerName,
+                                      offer.buyerPhone,
+                                      offer.totalOfferAmount,
+                                      offer.buyerId
+                                    );
+                                    if (res && res.ok === false) {
+                                      setScrapNotice({ type: 'err', text: res.error || 'Could not accept offer.' });
+                                    }
+                                  } finally {
+                                    setBusyRequestId(null);
+                                  }
+                                }}
                                 className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 disabled:text-slate-600 text-white font-bold rounded-lg text-[11px]"
                               >
                                 {isAdmin ? `Accept Quote (₹${offer.totalOfferAmount})` : 'Accept Quote (BACKEND REQUIRED)'}
@@ -516,23 +641,102 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
         )}
 
         {/* TAB 4: KABARI BUYER PORTAL */}
-        {activeTab === 'buyer_portal' && (
-          <div className="space-y-3">
-            <div className="bg-amber-50 rounded-2xl p-3 border border-amber-200 text-xs text-amber-900 space-y-1">
-              <strong className="block">Kabari Buyer Dispatch Terminal (BACKEND REQUIRED)</strong>
+        {activeTab === 'buyer_portal' && canOperateBuyerPortal && (
+          <div className="space-y-4">
+            <div className="bg-emerald-50 rounded-2xl p-3 border border-emerald-200 text-xs text-emerald-900 space-y-1">
+              <strong className="block">Authorized Kabari Buyer Dispatch Terminal</strong>
               <p>
-                Customer doorstep addresses and phone numbers stay strictly hidden from unassigned buyers. Submitting live buyer quotes across accounts requires trusted Cloud Functions dispatch.
+                Customer doorstep addresses and phone numbers stay strictly protected until your quote is accepted. Submit purchase quotes on PII-free local summaries below.
               </p>
             </div>
 
+            {assignedBuyerPickups.length > 0 && (
+              <div className="space-y-2.5">
+                <h4 className="font-bold text-sm text-gray-800">Assigned Scrap Pickups ({assignedBuyerPickups.length})</h4>
+                {assignedBuyerPickups.map((req) => (
+                  <div key={req.id} className="bg-white rounded-2xl border-2 border-emerald-200 p-4 shadow-sm space-y-2.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded">{req.id}</span>
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                        {req.status.replace('_', ' ')}
+                      </span>
+                    </div>
+                    <div>
+                      <h5 className="font-bold text-gray-900">{req.categoryLabel} ({req.estimatedWeight})</h5>
+                      <p className="text-gray-700">Customer: <strong>{req.customerName}</strong> · <span className="font-mono">{req.customerPhone}</span></p>
+                      <p className="text-gray-600">{req.pickupAddress}, {req.locality} ({req.pincode})</p>
+                    </div>
+                    {req.status !== 'completed' && (
+                      <div className="flex gap-2 pt-1">
+                        {req.status === 'accepted' && (
+                          <button
+                            type="button"
+                            disabled={busyRequestId === req.id}
+                            onClick={async () => {
+                              setBusyRequestId(req.id);
+                              try {
+                                const res = await onUpdateScrapStatus(req.id, 'pickup_scheduled');
+                                if (res && res.ok === false) setScrapNotice({ type: 'err', text: res.error || 'Update failed.' });
+                              } finally {
+                                setBusyRequestId(null);
+                              }
+                            }}
+                            className="flex-1 py-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white font-bold rounded-xl"
+                          >
+                            Schedule Pickup
+                          </button>
+                        )}
+                        {(req.status === 'accepted' || req.status === 'pickup_scheduled') && (
+                          <button
+                            type="button"
+                            disabled={busyRequestId === req.id}
+                            onClick={async () => {
+                              setBusyRequestId(req.id);
+                              try {
+                                const res = await onUpdateScrapStatus(req.id, 'picked_up');
+                                if (res && res.ok === false) setScrapNotice({ type: 'err', text: res.error || 'Update failed.' });
+                              } finally {
+                                setBusyRequestId(null);
+                              }
+                            }}
+                            className="flex-1 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold rounded-xl"
+                          >
+                            Mark Picked Up
+                          </button>
+                        )}
+                        {(req.status === 'pickup_scheduled' || req.status === 'picked_up') && (
+                          <button
+                            type="button"
+                            disabled={busyRequestId === req.id}
+                            onClick={async () => {
+                              setBusyRequestId(req.id);
+                              try {
+                                const res = await onUpdateScrapStatus(req.id, 'completed');
+                                if (res && res.ok === false) setScrapNotice({ type: 'err', text: res.error || 'Update failed.' });
+                              } finally {
+                                setBusyRequestId(null);
+                              }
+                            }}
+                            className="flex-1 py-2 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl"
+                          >
+                            Mark Completed
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             <h4 className="font-bold text-sm text-gray-800">Open Customer Scrap Summaries</h4>
 
-            {scrapRequests.filter((r) => r.status === 'open' || r.status === 'offers_received').length === 0 ? (
+            {openBuyerListings.length === 0 ? (
               <p className="text-xs text-gray-400 py-6 text-center">No open customer requests in this area currently.</p>
             ) : (
-              scrapRequests
-                .filter((r) => r.status === 'open' || r.status === 'offers_received')
-                .map((req) => (
+              openBuyerListings.map((req) => {
+                const existingMyOffer = 'myOffer' in req ? req.myOffer : undefined;
+                return (
                   <div key={req.id} className="bg-white rounded-2xl border border-gray-200 p-4 shadow-sm space-y-3 text-xs">
                     <div className="flex items-center justify-between">
                       <span className="font-mono font-bold text-gray-600 bg-gray-100 px-2 py-0.5 rounded">{req.id}</span>
@@ -546,20 +750,37 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
                       <div>
                         <h4 className="font-bold text-gray-900">{req.categoryLabel}</h4>
                         <p className="text-gray-600">Approx: <strong>{req.estimatedWeight}</strong></p>
-                        <p className="text-gray-500">Doorstep address & phone hidden until offer acceptance.</p>
+                        {req.description && <p className="text-gray-600 mt-0.5">{req.description}</p>}
+                        <p className="text-gray-500 mt-0.5">Doorstep address & phone hidden until offer acceptance.</p>
                       </div>
                     </div>
 
+                    {existingMyOffer && (
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-900 flex items-center justify-between">
+                        <span>Your Quote Sent: <strong>₹{existingMyOffer.totalOfferAmount}</strong> ({existingMyOffer.pickupTimeEstimate})</span>
+                        <span className="uppercase font-bold text-emerald-700">{existingMyOffer.status}</span>
+                      </div>
+                    )}
+
                     <button
-                      disabled={!isAdmin}
-                      onClick={() => isAdmin && setSelectedRequestForOffer(req)}
-                      className="w-full py-2 bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-200 disabled:text-slate-600 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-sm"
+                      type="button"
+                      onClick={() => {
+                        if (existingMyOffer) {
+                          setOfferPricePerKg(existingMyOffer.pricePerKg || 30);
+                          setOfferTotalAmount(existingMyOffer.totalOfferAmount);
+                          setOfferPickupTime(existingMyOffer.pickupTimeEstimate);
+                          setOfferNotes(existingMyOffer.notes || '');
+                        }
+                        setSelectedRequestForOffer(req);
+                      }}
+                      className="w-full py-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-sm"
                     >
                       <DollarSign className="w-4 h-4" />
-                      {isAdmin ? 'Send Purchase Quote to Customer' : 'Quote Submission Disabled (BACKEND REQUIRED)'}
+                      {existingMyOffer ? 'Update Your Purchase Quote' : 'Send Purchase Quote to Customer'}
                     </button>
                   </div>
-                ))
+                );
+              })
             )}
 
             {/* Offer Submission Modal */}
@@ -620,6 +841,7 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
                     <div className="pt-2 flex gap-2">
                       <button
                         type="button"
+                        disabled={isSubmittingOffer}
                         onClick={() => setSelectedRequestForOffer(null)}
                         className="flex-1 py-2 bg-gray-100 text-gray-700 font-bold rounded-xl"
                       >
@@ -627,9 +849,10 @@ export const ScrapMarketplaceView: React.FC<ScrapMarketplaceViewProps> = ({
                       </button>
                       <button
                         type="submit"
-                        className="flex-1 py-2 bg-emerald-700 text-white font-bold rounded-xl shadow-sm"
+                        disabled={isSubmittingOffer}
+                        className="flex-1 py-2 bg-emerald-700 text-white font-bold rounded-xl shadow-sm disabled:opacity-50"
                       >
-                        Send Offer
+                        {isSubmittingOffer ? 'Sending...' : 'Send Offer'}
                       </button>
                     </div>
                   </form>

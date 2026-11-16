@@ -59,6 +59,47 @@ service cloud.firestore {
         request.auth.token.email == 'taibaralir@gmail.com';
     }
 
+    // Role Account lookup: Admin-provisioned /partnerAccounts/{uid}
+    function hasPartnerAccount() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid));
+    }
+
+    function hasPartnerRole(allowedRoles) {
+      return hasPartnerAccount() &&
+        get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.status == 'active' &&
+        get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.role in allowedRoles;
+    }
+
+    function hasPartnerAccountForEntity(allowedRoles, entityId) {
+      return hasPartnerRole(allowedRoles) &&
+        entityId is string &&
+        isValidId(entityId) &&
+        ('linkedEntityId' in get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data) &&
+        get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.linkedEntityId is string &&
+        isValidId(get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.linkedEntityId) &&
+        get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.linkedEntityId == entityId;
+    }
+
+    // Active partner account verification for an arbitrary entity owner (never falls back to empty ownerId)
+    function isActivePartnerOwnerAccount(ownerId, expectedRole, entityId) {
+      return ownerId is string &&
+        isValidId(ownerId) &&
+        exists(/databases/$(database)/documents/partnerAccounts/$(ownerId)) &&
+        get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data.status == 'active' &&
+        get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data.role == expectedRole &&
+        ('linkedEntityId' in get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data) &&
+        get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data.linkedEntityId == entityId;
+    }
+
+    function isActiveEmployerAccount(ownerId) {
+      return ownerId is string &&
+        isValidId(ownerId) &&
+        exists(/databases/$(database)/documents/partnerAccounts/$(ownerId)) &&
+        get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data.status == 'active' &&
+        get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data.role == 'employer';
+    }
+
     // Relational shop approval check (server-side doc check via get/exists)
     function isShopApproved(shopId) {
       return shopId is string &&
@@ -67,31 +108,36 @@ service cloud.firestore {
         get(/databases/$(database)/documents/shops/$(shopId)).data.status == 'approved';
     }
 
-    // Relational shop ownership check (must be an approved shop owned by caller)
+    // Relational shop ownership check (must be an active shopkeeper account & approved shop owned by caller)
     function isApprovedShopOwner(shopId) {
       return isSignedIn() &&
+        hasPartnerAccountForEntity(['shopkeeper'], shopId) &&
         isShopApproved(shopId) &&
         get(/databases/$(database)/documents/shops/$(shopId)).data.ownerId == request.auth.uid;
     }
 
-    // Relational doctor ownership check (must be an approved doctor owned by caller)
+    // Relational doctor ownership check (must be an active doctor account & approved doctor owned by caller)
     function isApprovedDoctorOwner(doctorDocId) {
       return isSignedIn() &&
-        doctorDocId is string &&
-        isValidId(doctorDocId) &&
+        hasPartnerAccountForEntity(['doctor'], doctorDocId) &&
         exists(/databases/$(database)/documents/doctors/$(doctorDocId)) &&
         get(/databases/$(database)/documents/doctors/$(doctorDocId)).data.ownerId == request.auth.uid &&
         get(/databases/$(database)/documents/doctors/$(doctorDocId)).data.status == 'approved';
     }
 
-    // Relational driver ownership check
-    function isApprovedDriverOwner(driverDocId) {
-      return isSignedIn() &&
-        driverDocId is string &&
+    // Relational driver approval & ownership checks
+    function isApprovedDriverRecord(driverDocId) {
+      return driverDocId is string &&
         isValidId(driverDocId) &&
         exists(/databases/$(database)/documents/drivers/$(driverDocId)) &&
-        get(/databases/$(database)/documents/drivers/$(driverDocId)).data.ownerId == request.auth.uid &&
         get(/databases/$(database)/documents/drivers/$(driverDocId)).data.status == 'approved';
+    }
+
+    function isApprovedDriverOwner(driverDocId) {
+      return isSignedIn() &&
+        hasPartnerAccountForEntity(['driver'], driverDocId) &&
+        isApprovedDriverRecord(driverDocId) &&
+        get(/databases/$(database)/documents/drivers/$(driverDocId)).data.ownerId == request.auth.uid;
     }
 
     // Relational delivery rider approval & ownership checks
@@ -104,6 +150,7 @@ service cloud.firestore {
 
     function isApprovedDeliveryOwner(personDocId) {
       return isSignedIn() &&
+        hasPartnerAccountForEntity(['delivery'], personDocId) &&
         isApprovedRiderRecord(personDocId) &&
         get(/databases/$(database)/documents/deliveryPersons/$(personDocId)).data.ownerId == request.auth.uid;
     }
@@ -111,20 +158,151 @@ service cloud.firestore {
     // Relational service provider ownership check (providerId stores /serviceProviders/{providerId} doc ID)
     function isApprovedServiceProviderOwner(providerDocId) {
       return isSignedIn() &&
-        providerDocId is string &&
-        isValidId(providerDocId) &&
+        hasPartnerAccountForEntity(['service_provider'], providerDocId) &&
         exists(/databases/$(database)/documents/serviceProviders/$(providerDocId)) &&
         get(/databases/$(database)/documents/serviceProviders/$(providerDocId)).data.ownerId == request.auth.uid &&
         get(/databases/$(database)/documents/serviceProviders/$(providerDocId)).data.status == 'approved';
     }
 
-    // Relational job ownership check
+    // Relational job ownership check (must be an active employer account)
     function isJobOwner(jobId) {
       return isSignedIn() &&
+        hasPartnerRole(['employer']) &&
         jobId is string &&
         isValidId(jobId) &&
         exists(/databases/$(database)/documents/jobs/$(jobId)) &&
         get(/databases/$(database)/documents/jobs/$(jobId)).data.employerId == request.auth.uid;
+    }
+
+    // Post-commit consistency checks for admin public projection writes (writeBatch safe)
+    function isAfterShopApprovedWithActiveOwner(shopId, expectedStatus) {
+      return existsAfter(/databases/$(database)/documents/shops/$(shopId)) &&
+        getAfter(/databases/$(database)/documents/shops/$(shopId)).data.status == expectedStatus &&
+        (
+          expectedStatus != 'approved' ||
+          (
+            ('ownerId' in getAfter(/databases/$(database)/documents/shops/$(shopId)).data) &&
+            isValidId(getAfter(/databases/$(database)/documents/shops/$(shopId)).data.ownerId) &&
+            existsAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/shops/$(shopId)).data.ownerId)) &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/shops/$(shopId)).data.ownerId)).data.status == 'active' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/shops/$(shopId)).data.ownerId)).data.role == 'shopkeeper' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/shops/$(shopId)).data.ownerId)).data.linkedEntityId == shopId
+          )
+        );
+    }
+
+    function isAfterRiderApprovedWithActiveOwner(riderId, expectedStatus) {
+      return existsAfter(/databases/$(database)/documents/deliveryPersons/$(riderId)) &&
+        getAfter(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.status == expectedStatus &&
+        (
+          expectedStatus != 'approved' ||
+          (
+            ('ownerId' in getAfter(/databases/$(database)/documents/deliveryPersons/$(riderId)).data) &&
+            isValidId(getAfter(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.ownerId) &&
+            existsAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.ownerId)) &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.ownerId)).data.status == 'active' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.ownerId)).data.role == 'delivery' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.ownerId)).data.linkedEntityId == riderId
+          )
+        );
+    }
+
+    function isAfterDriverApprovedWithActiveOwner(driverId, expectedStatus) {
+      return existsAfter(/databases/$(database)/documents/drivers/$(driverId)) &&
+        getAfter(/databases/$(database)/documents/drivers/$(driverId)).data.status == expectedStatus &&
+        (
+          expectedStatus != 'approved' ||
+          (
+            ('ownerId' in getAfter(/databases/$(database)/documents/drivers/$(driverId)).data) &&
+            isValidId(getAfter(/databases/$(database)/documents/drivers/$(driverId)).data.ownerId) &&
+            existsAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/drivers/$(driverId)).data.ownerId)) &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/drivers/$(driverId)).data.ownerId)).data.status == 'active' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/drivers/$(driverId)).data.ownerId)).data.role == 'driver' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/drivers/$(driverId)).data.ownerId)).data.linkedEntityId == driverId
+          )
+        );
+    }
+
+    function isAfterDoctorApprovedWithActiveOwner(doctorId, expectedStatus) {
+      return existsAfter(/databases/$(database)/documents/doctors/$(doctorId)) &&
+        getAfter(/databases/$(database)/documents/doctors/$(doctorId)).data.status == expectedStatus &&
+        (
+          expectedStatus != 'approved' ||
+          (
+            ('ownerId' in getAfter(/databases/$(database)/documents/doctors/$(doctorId)).data) &&
+            isValidId(getAfter(/databases/$(database)/documents/doctors/$(doctorId)).data.ownerId) &&
+            existsAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/doctors/$(doctorId)).data.ownerId)) &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/doctors/$(doctorId)).data.ownerId)).data.status == 'active' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/doctors/$(doctorId)).data.ownerId)).data.role == 'doctor' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/doctors/$(doctorId)).data.ownerId)).data.linkedEntityId == doctorId
+          )
+        );
+    }
+
+    function isAfterProviderApprovedWithActiveOwner(providerId, expectedStatus) {
+      return existsAfter(/databases/$(database)/documents/serviceProviders/$(providerId)) &&
+        getAfter(/databases/$(database)/documents/serviceProviders/$(providerId)).data.status == expectedStatus &&
+        (
+          expectedStatus != 'approved' ||
+          (
+            ('ownerId' in getAfter(/databases/$(database)/documents/serviceProviders/$(providerId)).data) &&
+            isValidId(getAfter(/databases/$(database)/documents/serviceProviders/$(providerId)).data.ownerId) &&
+            existsAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/serviceProviders/$(providerId)).data.ownerId)) &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/serviceProviders/$(providerId)).data.ownerId)).data.status == 'active' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/serviceProviders/$(providerId)).data.ownerId)).data.role == 'service_provider' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/serviceProviders/$(providerId)).data.ownerId)).data.linkedEntityId == providerId
+          )
+        );
+    }
+
+    function isAfterJobApprovedWithActiveOwner(jobId, expectedStatus) {
+      return existsAfter(/databases/$(database)/documents/jobs/$(jobId)) &&
+        getAfter(/databases/$(database)/documents/jobs/$(jobId)).data.status == expectedStatus &&
+        (
+          expectedStatus != 'approved' ||
+          (
+            ('employerId' in getAfter(/databases/$(database)/documents/jobs/$(jobId)).data) &&
+            isValidId(getAfter(/databases/$(database)/documents/jobs/$(jobId)).data.employerId) &&
+            existsAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/jobs/$(jobId)).data.employerId)) &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/jobs/$(jobId)).data.employerId)).data.status == 'active' &&
+            getAfter(/databases/$(database)/documents/partnerAccounts/$(getAfter(/databases/$(database)/documents/jobs/$(jobId)).data.employerId)).data.role == 'employer'
+          )
+        );
+    }
+
+    // Strict rider eligibility check for shopkeeper dispatch on /orders (<= 4 unique reads)
+    function isEligibleOnlineDeliveryRiderForShop(riderId, shopLocality) {
+      return riderId is string &&
+        isValidId(riderId) &&
+        exists(/databases/$(database)/documents/deliveryPersons/$(riderId)) &&
+        get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.status == 'approved' &&
+        get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.isOnline == true &&
+        ('ownerId' in get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data) &&
+        isActivePartnerOwnerAccount(get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.ownerId, 'delivery', riderId) &&
+        (
+          (
+            get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.locality == shopLocality &&
+            (
+              !('currentLocation' in get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data) ||
+              get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.currentLocation == '' ||
+              get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.currentLocation == shopLocality
+            )
+          ) ||
+          (
+            exists(/databases/$(database)/documents/routingConfig/universal) &&
+            get(/databases/$(database)/documents/routingConfig/universal).data.globalCrossLocalityEnabled == true &&
+            (shopLocality in get(/databases/$(database)/documents/routingConfig/universal).data.rulesByLocality) &&
+            get(/databases/$(database)/documents/routingConfig/universal).data.rulesByLocality[shopLocality].crossLocalityEnabled == true &&
+            (
+              riderId in get(/databases/$(database)/documents/routingConfig/universal).data.rulesByLocality[shopLocality].deliveryRiderIds ||
+              (
+                'servedLocalities' in get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data &&
+                shopLocality in get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.servedLocalities
+              ) ||
+              get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.locality in get(/databases/$(database)/documents/routingConfig/universal).data.rulesByLocality[shopLocality].nearbyLocalities
+            )
+          )
+        );
     }
 
     // =========================================================================
@@ -162,6 +340,33 @@ service cloud.firestore {
         data.status in ['pending', 'approved', 'rejected', 'suspended'] &&
         (!('address' in data) || (data.address is string && data.address.size() <= 500)) &&
         (!('description' in data) || (data.description is string && data.description.size() <= 1500));
+    }
+
+    function isValidPartnerAccountData(data) {
+      return data.keys().hasAll(['uid', 'role', 'displayName', 'loginEmail', 'status', 'assignedBy']) &&
+        data.keys().hasOnly([
+          'uid', 'role', 'displayName', 'loginEmail', 'phone',
+          'linkedEntityId', 'status', 'suspendedEntityPreviousStatus',
+          'assignedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        !('password' in data) &&
+        !('isAdmin' in data) &&
+        !('admin' in data) &&
+        data.uid is string && isValidId(data.uid) &&
+        data.role in ['shopkeeper', 'driver', 'delivery', 'doctor', 'service_provider', 'employer', 'kabari'] &&
+        data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 150 &&
+        data.loginEmail is string && data.loginEmail.size() > 0 && data.loginEmail.size() <= 150 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() > 0 && data.phone.size() <= 30)) &&
+        (!('linkedEntityId' in data) || isValidId(data.linkedEntityId)) &&
+        (!('suspendedEntityPreviousStatus' in data) || data.suspendedEntityPreviousStatus in ['pending', 'approved', 'rejected', 'suspended']) &&
+        data.status in ['active', 'suspended'] &&
+        data.assignedBy is string && data.assignedBy.size() > 0 && data.assignedBy.size() <= 150;
+    }
+
+    function isValidPhoneAuthLookupData(data) {
+      return data.keys().hasAll(['loginEmail']) &&
+        data.keys().hasOnly(['loginEmail', 'updatedAt']) &&
+        data.loginEmail is string && data.loginEmail.size() > 0 && data.loginEmail.size() <= 150;
     }
 
     // Strict allowlist for publicShops (no ownerId, ownerEmail, private phone, license, revenue)
@@ -249,10 +454,33 @@ service cloud.firestore {
     // Strict allowlist for publicRiders (no ownerId, phone, email)
     function isValidPublicRiderCard(data) {
       return data.keys().hasAll(['id', 'name', 'locality', 'status']) &&
-        data.keys().hasOnly(['id', 'name', 'locality', 'status', 'isOnline', 'rating', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'name', 'locality', 'currentLocation', 'servedLocalities',
+          'status', 'isOnline', 'accountStatus', 'rating', 'updatedAt'
+        ]) &&
         data.id is string && isValidId(data.id) &&
         data.name is string && data.name.size() > 0 && data.name.size() <= 120 &&
         data.locality is string && data.locality.size() > 0 && data.locality.size() <= 120 &&
+        (!('currentLocation' in data) || (data.currentLocation is string && data.currentLocation.size() <= 120)) &&
+        (!('servedLocalities' in data) || data.servedLocalities is list) &&
+        (!('accountStatus' in data) || data.accountStatus in ['active', 'suspended']) &&
+        data.status in ['pending', 'approved', 'rejected', 'suspended'];
+    }
+
+    // Strict allowlist for publicDrivers (no ownerId, phone, email, vehicleNumber, licenseNumber)
+    function isValidPublicDriverCard(data) {
+      return data.keys().hasAll(['id', 'name', 'vehicleType', 'locality', 'status']) &&
+        data.keys().hasOnly([
+          'id', 'name', 'vehicleType', 'locality', 'currentLocation', 'servedLocalities',
+          'status', 'isOnline', 'accountStatus', 'rating', 'totalRides', 'updatedAt'
+        ]) &&
+        data.id is string && isValidId(data.id) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 120 &&
+        data.vehicleType in ['toto', 'auto', 'taxi'] &&
+        data.locality is string && data.locality.size() > 0 && data.locality.size() <= 120 &&
+        (!('currentLocation' in data) || (data.currentLocation is string && data.currentLocation.size() <= 120)) &&
+        (!('servedLocalities' in data) || data.servedLocalities is list) &&
+        (!('accountStatus' in data) || data.accountStatus in ['active', 'suspended']) &&
         data.status in ['pending', 'approved', 'rejected', 'suspended'];
     }
 
@@ -358,8 +586,50 @@ service cloud.firestore {
         data.pickupAddress is string && data.pickupAddress.size() > 0 && data.pickupAddress.size() <= 500 &&
         data.locality is string && data.locality.size() > 0 && data.locality.size() <= 100 &&
         data.pincode is string && data.pincode.size() > 0 && data.pincode.size() <= 16 &&
-        data.offers is list && data.offers.size() <= 50 &&
+        (!('offers' in data) || (data.offers is list && data.offers.size() <= 50)) &&
         data.status in ['open', 'offers_received', 'accepted', 'pickup_scheduled', 'picked_up', 'completed', 'cancelled'];
+    }
+
+    // Strict allowlist for PII-free open scrap summaries (no customerName, customerPhone, pickupAddress, selectedBuyer*)
+    function isValidPublicScrapListing(data) {
+      return data.keys().hasAll(['id', 'category', 'categoryLabel', 'estimatedWeight', 'locality', 'pincode', 'status']) &&
+        data.keys().hasOnly([
+          'id', 'category', 'categoryLabel', 'estimatedWeight', 'description',
+          'photos', 'locality', 'pincode', 'approxWeightKg', 'status',
+          'createdAt', 'updatedAt'
+        ]) &&
+        !('customerId' in data) &&
+        !('customerName' in data) &&
+        !('customerPhone' in data) &&
+        !('pickupAddress' in data) &&
+        !('selectedBuyerId' in data) &&
+        !('selectedBuyerName' in data) &&
+        !('selectedBuyerPhone' in data) &&
+        data.id is string && isValidId(data.id) &&
+        data.category is string && data.category.size() > 0 && data.category.size() <= 40 &&
+        data.categoryLabel is string && data.categoryLabel.size() > 0 && data.categoryLabel.size() <= 120 &&
+        data.estimatedWeight is string && data.estimatedWeight.size() > 0 && data.estimatedWeight.size() <= 60 &&
+        data.locality is string && data.locality.size() > 0 && data.locality.size() <= 100 &&
+        data.pincode is string && data.pincode.size() > 0 && data.pincode.size() <= 16 &&
+        data.status in ['open', 'offers_received', 'accepted', 'pickup_scheduled', 'picked_up', 'completed', 'cancelled'];
+    }
+
+    function isValidScrapOfferData(data) {
+      return data.keys().hasAll(['id', 'requestId', 'buyerId', 'buyerName', 'totalOfferAmount', 'pickupTimeEstimate', 'status']) &&
+        data.keys().hasOnly([
+          'id', 'requestId', 'scrapRequestId', 'buyerId', 'buyerName', 'buyerPhone',
+          'pricePerKg', 'totalOfferAmount', 'pickupTimeEstimate', 'notes',
+          'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && isValidId(data.id) &&
+        data.requestId is string && isValidId(data.requestId) &&
+        data.buyerId is string && isValidId(data.buyerId) &&
+        data.buyerName is string && data.buyerName.size() > 0 && data.buyerName.size() <= 120 &&
+        data.totalOfferAmount is number && data.totalOfferAmount >= 0 &&
+        (!('pricePerKg' in data) || (data.pricePerKg is number && data.pricePerKg >= 0)) &&
+        data.pickupTimeEstimate is string && data.pickupTimeEstimate.size() > 0 && data.pickupTimeEstimate.size() <= 120 &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 500)) &&
+        data.status in ['pending', 'accepted', 'rejected'];
     }
 
     function isValidComplaintData(data) {
@@ -406,6 +676,76 @@ service cloud.firestore {
         ]);
     }
 
+    function isValidRoutingConfigData(data) {
+      return data.keys().hasAll(['globalCrossLocalityEnabled', 'rulesByLocality']) &&
+        data.keys().hasOnly([
+          'globalCrossLocalityEnabled', 'rulesByLocality', 'updatedBy', 'updatedAt'
+        ]) &&
+        data.globalCrossLocalityEnabled is bool &&
+        data.rulesByLocality is map;
+    }
+
+    function isValidRoutingAlertData(data) {
+      return data.keys().hasAll(['id', 'requestId', 'serviceCategory', 'requestLocality', 'message', 'status', 'createdAt']) &&
+        data.keys().hasOnly([
+          'id', 'requestId', 'serviceCategory', 'requestLocality',
+          'vehicleType', 'serviceRequired', 'message', 'status',
+          'createdAt', 'resolvedAt'
+        ]) &&
+        data.id is string && isValidId(data.id) &&
+        data.requestId is string && data.requestId.size() > 0 && data.requestId.size() <= 128 &&
+        data.serviceCategory in ['shop_order', 'delivery', 'ride', 'service'] &&
+        data.requestLocality is string && data.requestLocality.size() > 0 && data.requestLocality.size() <= 120 &&
+        data.message is string && data.message.size() > 0 && data.message.size() <= 500 &&
+        data.status in ['open', 'resolved'];
+    }
+
+    function isOwnerOfUnavailableRoutingRequest(data) {
+      return isSignedIn() &&
+        data.id == ('rt-alert-' + data.requestId) &&
+        isValidId(data.requestId) &&
+        (
+          (
+            data.serviceCategory == 'shop_order' &&
+            existsAfter(/databases/$(database)/documents/orders/$(data.requestId)) &&
+            getAfter(/databases/$(database)/documents/orders/$(data.requestId)).data.customerId == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/orders/$(data.requestId)).data.routingStatus == 'unavailable_in_locality' &&
+            getAfter(/databases/$(database)/documents/orders/$(data.requestId)).data.pickupLocality == data.requestLocality
+          ) ||
+          (
+            data.serviceCategory == 'delivery' &&
+            existsAfter(/databases/$(database)/documents/deliveries/$(data.requestId)) &&
+            getAfter(/databases/$(database)/documents/deliveries/$(data.requestId)).data.customerId == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/deliveries/$(data.requestId)).data.routingStatus == 'unavailable_in_locality' &&
+            getAfter(/databases/$(database)/documents/deliveries/$(data.requestId)).data.pickupLocality == data.requestLocality
+          ) ||
+          (
+            data.serviceCategory == 'ride' &&
+            existsAfter(/databases/$(database)/documents/rideBookings/$(data.requestId)) &&
+            getAfter(/databases/$(database)/documents/rideBookings/$(data.requestId)).data.customerId == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/rideBookings/$(data.requestId)).data.routingStatus == 'unavailable_in_locality' &&
+            getAfter(/databases/$(database)/documents/rideBookings/$(data.requestId)).data.pickupLocality == data.requestLocality
+          ) ||
+          (
+            data.serviceCategory == 'service' &&
+            existsAfter(/databases/$(database)/documents/serviceRequests/$(data.requestId)) &&
+            getAfter(/databases/$(database)/documents/serviceRequests/$(data.requestId)).data.customerId == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/serviceRequests/$(data.requestId)).data.routingStatus == 'unavailable_in_locality' &&
+            getAfter(/databases/$(database)/documents/serviceRequests/$(data.requestId)).data.locality == data.requestLocality
+          )
+        );
+    }
+
+    function isValidAdminActivityData(data) {
+      return data.keys().hasAll(['id', 'adminEmail', 'action', 'details', 'timestamp']) &&
+        data.keys().hasOnly(['id', 'adminEmail', 'action', 'details', 'timestamp']) &&
+        data.id is string && isValidId(data.id) &&
+        data.adminEmail is string && data.adminEmail.size() > 0 && data.adminEmail.size() <= 150 &&
+        data.action is string && data.action.size() > 0 && data.action.size() <= 150 &&
+        data.details is string && data.details.size() > 0 && data.details.size() <= 1000 &&
+        data.timestamp is string && data.timestamp.size() > 0 && data.timestamp.size() <= 64;
+    }
+
     // =========================================================================
     // DEFAULT DENY CATCH-ALL (GLOBAL SAFETY NET)
     // =========================================================================
@@ -450,25 +790,43 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // PRIVATE PARTNER DIRECTORY: SHOPS (OWNER & ADMIN ONLY) & PUBLIC CARDS
+    // ADMIN-ISSUED PARTNER ROLE ACCOUNTS & HASHED MOBILE LOGIN LOOKUP
+    // =========================================================================
+    match /partnerAccounts/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isValidId(uid) &&
+        isAdmin() &&
+        isValidPartnerAccountData(incoming()) &&
+        incoming().uid == uid;
+      allow delete: if isAdmin();
+    }
+
+    match /phoneAuthLookup/{phoneHash} {
+      allow get: if isValidId(phoneHash);
+      allow list: if false;
+      allow create, update: if isValidId(phoneHash) &&
+        isAdmin() &&
+        isValidPhoneAuthLookupData(incoming());
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // PRIVATE PARTNER DIRECTORY: SHOPS (ADMIN PROVISIONED, OWNER & ADMIN ONLY)
     // =========================================================================
     match /shops/{shopId} {
       allow get: if isValidId(shopId) && (isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid));
       allow list: if isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
       allow create: if isValidId(shopId) &&
-        isSignedIn() &&
-        isValidShopData(incoming()) &&
-        (
-          isAdmin() ||
-          (incoming().ownerId == request.auth.uid && incoming().status == 'pending' && (!('isVerified' in incoming()) || incoming().isVerified == false))
-        );
+        isAdmin() &&
+        isValidShopData(incoming());
       allow update: if isValidId(shopId) &&
         isSignedIn() &&
         isValidShopData(incoming()) &&
         (
           isAdmin() ||
           (
-            existing().ownerId == request.auth.uid &&
+            isApprovedShopOwner(shopId) &&
             incoming().ownerId == existing().ownerId &&
             incoming().status == existing().status &&
             !incoming().diff(existing()).affectedKeys().hasAny(['status', 'isVerified', 'ownerId'])
@@ -478,22 +836,45 @@ service cloud.firestore {
     }
 
     match /publicShops/{shopId} {
-      allow get: if isValidId(shopId) && (existing().status == 'approved' || isAdmin());
+      allow get: if isValidId(shopId) && (
+        isAdmin() ||
+        (
+          existing().status == 'approved' &&
+          isShopApproved(shopId) &&
+          ('ownerId' in get(/databases/$(database)/documents/shops/$(shopId)).data) &&
+          isActivePartnerOwnerAccount(get(/databases/$(database)/documents/shops/$(shopId)).data.ownerId, 'shopkeeper', shopId)
+        )
+      );
       allow list: if existing().status == 'approved' || isAdmin();
-      allow create, update: if isValidId(shopId) && isAdmin() && isValidPublicShopCard(incoming());
+      allow create, update: if isValidId(shopId) &&
+        isAdmin() &&
+        isValidPublicShopCard(incoming()) &&
+        incoming().id == shopId &&
+        isAfterShopApprovedWithActiveOwner(shopId, incoming().status);
       allow delete: if isAdmin();
     }
 
     // =========================================================================
-    // PRIVATE PRODUCTS (OWNER & ADMIN ONLY; CONTAINS ownerId) & PUBLIC CARDS (NO ownerId)
+    // PRIVATE PRODUCTS (ACTIVE APPROVED SHOP OWNER & ADMIN ONLY; CONTAINS ownerId) & PUBLIC CARDS (NO ownerId)
     // =========================================================================
     match /products/{productId} {
       allow get: if isValidId(productId) && (
         isAdmin() ||
-        (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid)
+        (
+          isSignedIn() &&
+          ('ownerId' in existing()) &&
+          existing().ownerId == request.auth.uid &&
+          ('shopId' in existing()) &&
+          isApprovedShopOwner(existing().shopId)
+        )
       );
-      allow list: if isAdmin() ||
-        (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
+      allow list: if isAdmin() || (
+        isSignedIn() &&
+        ('ownerId' in existing()) &&
+        existing().ownerId == request.auth.uid &&
+        ('shopId' in existing()) &&
+        isApprovedShopOwner(existing().shopId)
+      );
       allow create: if isValidId(productId) &&
         isSignedIn() &&
         isValidProductData(incoming()) &&
@@ -535,8 +916,13 @@ service cloud.firestore {
       allow create: if isValidId(productId) &&
         isSignedIn() &&
         isValidPublicProductCard(incoming()) &&
+        incoming().id == productId &&
         (
-          isAdmin() ||
+          (
+            isAdmin() &&
+            existsAfter(/databases/$(database)/documents/shops/$(incoming().shopId)) &&
+            getAfter(/databases/$(database)/documents/shops/$(incoming().shopId)).data.status == incoming().shopStatus
+          ) ||
           (
             isApprovedShopOwner(incoming().shopId) &&
             incoming().shopStatus == 'approved' &&
@@ -549,8 +935,13 @@ service cloud.firestore {
       allow update: if isValidId(productId) &&
         isSignedIn() &&
         isValidPublicProductCard(incoming()) &&
+        incoming().id == productId &&
         (
-          isAdmin() ||
+          (
+            isAdmin() &&
+            existsAfter(/databases/$(database)/documents/shops/$(incoming().shopId)) &&
+            getAfter(/databases/$(database)/documents/shops/$(incoming().shopId)).data.status == incoming().shopStatus
+          ) ||
           (
             existing().shopId == incoming().shopId &&
             incoming().shopStatus == existing().shopStatus &&
@@ -576,7 +967,7 @@ service cloud.firestore {
         (
           isAdmin() ||
           ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-          ('riderId' in existing() && (existing().riderId == request.auth.uid || isApprovedDeliveryOwner(existing().riderId))) ||
+          ('riderId' in existing() && isApprovedDeliveryOwner(existing().riderId)) ||
           ('shopId' in existing() && isApprovedShopOwner(existing().shopId))
         );
       allow list: if isAdmin() ||
@@ -584,7 +975,7 @@ service cloud.firestore {
           isSignedIn() &&
           (
             ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-            ('riderId' in existing() && (existing().riderId == request.auth.uid || isApprovedDeliveryOwner(existing().riderId))) ||
+            ('riderId' in existing() && isApprovedDeliveryOwner(existing().riderId)) ||
             ('shopId' in existing() && isApprovedShopOwner(existing().shopId))
           )
         );
@@ -593,8 +984,15 @@ service cloud.firestore {
         isValidOrderData(incoming()) &&
         incoming().customerId == request.auth.uid &&
         incoming().status == 'pending' &&
+        ('pickupLocality' in incoming() && incoming().pickupLocality is string && incoming().pickupLocality.size() > 0 && incoming().pickupLocality.size() <= 120) &&
+        ('locality' in incoming() && incoming().locality is string && incoming().locality.size() > 0 && incoming().locality.size() <= 120) &&
+        (!('routingStatus' in incoming()) || incoming().routingStatus in ['pending_admin_routing', 'unavailable_in_locality']) &&
         !('riderId' in incoming()) &&
         !('riderPhone' in incoming()) &&
+        !('riderLocality' in incoming()) &&
+        !('assignmentHistory' in incoming()) &&
+        !('returnRequest' in incoming()) &&
+        !('rejectionReason' in incoming()) &&
         (!('confirmedByShopkeeper' in incoming()) || incoming().confirmedByShopkeeper == false) &&
         isShopApproved(incoming().shopId) &&
         (!('shopOwnerId' in incoming()) || incoming().shopOwnerId == '' || incoming().shopOwnerId == get(/databases/$(database)/documents/shops/$(incoming().shopId)).data.ownerId);
@@ -615,7 +1013,7 @@ service cloud.firestore {
             (
               (
                 existing().customerId == request.auth.uid &&
-                existing().status in ['pending', 'placed', 'confirmed'] &&
+                existing().status in ['pending', 'placed', 'confirmed', 'preparing', 'packed', 'ready_for_dispatch'] &&
                 incoming().status == 'cancelled' &&
                 incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
               ) ||
@@ -628,7 +1026,10 @@ service cloud.firestore {
                   !incoming().diff(existing()).affectedKeys().hasAny(['riderId', 'riderName']) ||
                   (
                     incoming().riderId is string &&
-                    isApprovedRiderRecord(incoming().riderId) &&
+                    isEligibleOnlineDeliveryRiderForShop(
+                      incoming().riderId,
+                      get(/databases/$(database)/documents/shops/$(existing().shopId)).data.locality
+                    ) &&
                     incoming().riderName == get(/databases/$(database)/documents/deliveryPersons/$(incoming().riderId)).data.name
                   )
                 ) &&
@@ -643,7 +1044,10 @@ service cloud.firestore {
                       incoming().status != 'out_for_delivery' ||
                       (
                         ('riderId' in incoming()) &&
-                        isApprovedRiderRecord(incoming().riderId) &&
+                        isEligibleOnlineDeliveryRiderForShop(
+                          incoming().riderId,
+                          get(/databases/$(database)/documents/shops/$(existing().shopId)).data.locality
+                        ) &&
                         incoming().riderName == get(/databases/$(database)/documents/deliveryPersons/$(incoming().riderId)).data.name
                       )
                     )
@@ -652,7 +1056,7 @@ service cloud.firestore {
               ) ||
               (
                 ('riderId' in existing()) &&
-                (existing().riderId == request.auth.uid || isApprovedDeliveryOwner(existing().riderId)) &&
+                isApprovedDeliveryOwner(existing().riderId) &&
                 incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
                 (
                   (existing().status in ['confirmed', 'packed', 'ready_for_dispatch'] && incoming().status == 'out_for_delivery') ||
@@ -675,32 +1079,61 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // DRIVERS (OWNER & ADMIN ONLY - PROTECTS PHONE & LICENSE PII)
+    // DRIVERS (ADMIN PROVISIONED, OWNER & ADMIN ONLY - PROTECTS PHONE & LICENSE PII)
     // =========================================================================
     match /drivers/{driverId} {
       allow get: if isValidId(driverId) && (isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid));
       allow list: if isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
       allow create: if isValidId(driverId) &&
-        isSignedIn() &&
+        isAdmin() &&
         incoming().name is string && incoming().name.size() <= 120 &&
-        incoming().phone is string && incoming().phone.size() <= 30 &&
-        (
-          isAdmin() ||
-          (
-            incoming().ownerId == request.auth.uid &&
-            incoming().status == 'pending' &&
-            (!('approvalStatus' in incoming()) || incoming().approvalStatus == 'pending')
-          )
-        );
+        incoming().phone is string && incoming().phone.size() <= 30;
       allow update: if isValidId(driverId) &&
         (
           isAdmin() ||
           (
             isSignedIn() &&
-            existing().ownerId == request.auth.uid &&
+            isApprovedDriverOwner(driverId) &&
             incoming().ownerId == existing().ownerId &&
             incoming().status == existing().status &&
             !incoming().diff(existing()).affectedKeys().hasAny(['status', 'approvalStatus', 'ownerId'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /publicDrivers/{driverId} {
+      allow get: if isValidId(driverId) && (
+        isAdmin() ||
+        (
+          existing().status == 'approved' &&
+          isApprovedDriverRecord(driverId) &&
+          ('ownerId' in get(/databases/$(database)/documents/drivers/$(driverId)).data) &&
+          isActivePartnerOwnerAccount(get(/databases/$(database)/documents/drivers/$(driverId)).data.ownerId, 'driver', driverId)
+        )
+      );
+      allow list: if existing().status == 'approved' || isAdmin();
+      allow create: if isValidId(driverId) &&
+        isAdmin() &&
+        isValidPublicDriverCard(incoming()) &&
+        incoming().id == driverId &&
+        isAfterDriverApprovedWithActiveOwner(driverId, incoming().status);
+      allow update: if isValidId(driverId) &&
+        isValidPublicDriverCard(incoming()) &&
+        incoming().id == driverId &&
+        (
+          (
+            isAdmin() &&
+            isAfterDriverApprovedWithActiveOwner(driverId, incoming().status)
+          ) ||
+          (
+            isApprovedDriverOwner(driverId) &&
+            incoming().status == existing().status &&
+            incoming().status == 'approved' &&
+            (!('accountStatus' in incoming()) || incoming().accountStatus == 'active') &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'vehicleType', 'locality', 'currentLocation', 'servedLocalities', 'isOnline', 'updatedAt'
+            ])
           )
         );
       allow delete: if isAdmin();
@@ -716,14 +1149,14 @@ service cloud.firestore {
         (
           isAdmin() ||
           ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-          ('driverId' in existing() && (existing().driverId == request.auth.uid || isApprovedDriverOwner(existing().driverId)))
+          ('driverId' in existing() && isApprovedDriverOwner(existing().driverId))
         );
       allow list: if isAdmin() ||
         (
           isSignedIn() &&
           (
             ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-            ('driverId' in existing() && (existing().driverId == request.auth.uid || isApprovedDriverOwner(existing().driverId)))
+            ('driverId' in existing() && isApprovedDriverOwner(existing().driverId))
           )
         );
       allow create: if isValidId(rideId) &&
@@ -735,14 +1168,19 @@ service cloud.firestore {
         incoming().customerPhone is string && incoming().customerPhone.size() > 0 && incoming().customerPhone.size() <= 30 &&
         incoming().pickupLocation is string && incoming().pickupLocation.size() > 0 && incoming().pickupLocation.size() <= 200 &&
         incoming().dropLocation is string && incoming().dropLocation.size() > 0 && incoming().dropLocation.size() <= 200 &&
+        ('pickupLocality' in incoming() && incoming().pickupLocality is string && incoming().pickupLocality.size() > 0 && incoming().pickupLocality.size() <= 120) &&
+        ('dropLocality' in incoming() && incoming().dropLocality is string && incoming().dropLocality.size() > 0 && incoming().dropLocality.size() <= 120) &&
+        (!('routingStatus' in incoming()) || incoming().routingStatus in ['pending_admin_routing', 'unavailable_in_locality']) &&
         incoming().estimatedFare is number && incoming().estimatedFare >= 0 &&
         (!('customerProposedFare' in incoming()) || (incoming().customerProposedFare is number && incoming().customerProposedFare >= 0)) &&
         !('driverId' in incoming()) &&
         !('driverName' in incoming()) &&
         !('driverPhone' in incoming()) &&
+        !('driverLocality' in incoming()) &&
         !('vehicleNumber' in incoming()) &&
         !('driverRating' in incoming()) &&
-        !('agreedFare' in incoming());
+        !('agreedFare' in incoming()) &&
+        !('assignmentHistory' in incoming());
       allow update: if isValidId(rideId) &&
         isSignedIn() &&
         (
@@ -763,6 +1201,7 @@ service cloud.firestore {
                 !('driverId' in incoming()) &&
                 !('driverName' in incoming()) &&
                 !('driverPhone' in incoming()) &&
+                !('driverLocality' in incoming()) &&
                 !('vehicleNumber' in incoming()) &&
                 !('driverRating' in incoming()) &&
                 !('agreedFare' in incoming()) &&
@@ -776,7 +1215,7 @@ service cloud.firestore {
           (
             ('driverId' in existing()) &&
             ('driverId' in incoming()) &&
-            (existing().driverId == request.auth.uid || isApprovedDriverOwner(existing().driverId)) &&
+            isApprovedDriverOwner(existing().driverId) &&
             incoming().customerId == existing().customerId &&
             incoming().driverId == existing().driverId &&
             (!('agreedFare' in existing()) || incoming().agreedFare == existing().agreedFare) &&
@@ -792,20 +1231,21 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // DELIVERY FLEET (OWNER & ADMIN ONLY) & NON-PII APPROVED RIDER CARDS
+    // DELIVERY FLEET (ADMIN PROVISIONED, OWNER & ADMIN ONLY) & APPROVED RIDER CARDS
     // =========================================================================
     match /deliveryPersons/{personId} {
       allow get: if isValidId(personId) && (isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid));
       allow list: if isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
       allow create: if isValidId(personId) &&
-        isSignedIn() &&
-        (isAdmin() || (incoming().ownerId == request.auth.uid && incoming().status == 'pending'));
+        isAdmin() &&
+        incoming().name is string && incoming().name.size() <= 120 &&
+        incoming().phone is string && incoming().phone.size() <= 30;
       allow update: if isValidId(personId) &&
         (
           isAdmin() ||
           (
             isSignedIn() &&
-            existing().ownerId == request.auth.uid &&
+            isApprovedDeliveryOwner(personId) &&
             incoming().ownerId == existing().ownerId &&
             incoming().status == existing().status &&
             !incoming().diff(existing()).affectedKeys().hasAny(['status', 'ownerId'])
@@ -815,9 +1255,40 @@ service cloud.firestore {
     }
 
     match /publicRiders/{riderId} {
-      allow get: if isValidId(riderId) && ((isSignedIn() && existing().status == 'approved') || isAdmin());
+      allow get: if isValidId(riderId) && (
+        isAdmin() ||
+        (
+          isSignedIn() &&
+          existing().status == 'approved' &&
+          isApprovedRiderRecord(riderId) &&
+          ('ownerId' in get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data) &&
+          isActivePartnerOwnerAccount(get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.ownerId, 'delivery', riderId)
+        )
+      );
       allow list: if (isSignedIn() && existing().status == 'approved') || isAdmin();
-      allow create, update: if isValidId(riderId) && isAdmin() && isValidPublicRiderCard(incoming());
+      allow create: if isValidId(riderId) &&
+        isAdmin() &&
+        isValidPublicRiderCard(incoming()) &&
+        incoming().id == riderId &&
+        isAfterRiderApprovedWithActiveOwner(riderId, incoming().status);
+      allow update: if isValidId(riderId) &&
+        isValidPublicRiderCard(incoming()) &&
+        incoming().id == riderId &&
+        (
+          (
+            isAdmin() &&
+            isAfterRiderApprovedWithActiveOwner(riderId, incoming().status)
+          ) ||
+          (
+            isApprovedDeliveryOwner(riderId) &&
+            incoming().status == existing().status &&
+            incoming().status == 'approved' &&
+            (!('accountStatus' in incoming()) || incoming().accountStatus == 'active') &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'locality', 'currentLocation', 'servedLocalities', 'isOnline', 'updatedAt'
+            ])
+          )
+        );
       allow delete: if isAdmin();
     }
 
@@ -831,14 +1302,14 @@ service cloud.firestore {
         (
           isAdmin() ||
           ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-          ('assignedDeliveryPersonId' in existing() && (existing().assignedDeliveryPersonId == request.auth.uid || isApprovedDeliveryOwner(existing().assignedDeliveryPersonId)))
+          ('assignedDeliveryPersonId' in existing() && isApprovedDeliveryOwner(existing().assignedDeliveryPersonId))
         );
       allow list: if isAdmin() ||
         (
           isSignedIn() &&
           (
             ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-            ('assignedDeliveryPersonId' in existing() && (existing().assignedDeliveryPersonId == request.auth.uid || isApprovedDeliveryOwner(existing().assignedDeliveryPersonId)))
+            ('assignedDeliveryPersonId' in existing() && isApprovedDeliveryOwner(existing().assignedDeliveryPersonId))
           )
         );
       allow create: if isValidId(deliveryId) &&
@@ -851,10 +1322,15 @@ service cloud.firestore {
         incoming().receiverName is string && incoming().receiverName.size() > 0 && incoming().receiverName.size() <= 120 &&
         incoming().receiverPhone is string && incoming().receiverPhone.size() > 0 && incoming().receiverPhone.size() <= 30 &&
         incoming().receiverAddress is string && incoming().receiverAddress.size() > 0 && incoming().receiverAddress.size() <= 500 &&
+        ('pickupLocality' in incoming() && incoming().pickupLocality is string && incoming().pickupLocality.size() > 0 && incoming().pickupLocality.size() <= 120) &&
+        ('dropLocality' in incoming() && incoming().dropLocality is string && incoming().dropLocality.size() > 0 && incoming().dropLocality.size() <= 120) &&
+        (!('routingStatus' in incoming()) || incoming().routingStatus in ['pending_admin_routing', 'unavailable_in_locality']) &&
         incoming().estimatedPrice is number && incoming().estimatedPrice >= 0 &&
         !('assignedDeliveryPersonId' in incoming()) &&
         !('assignedDeliveryPersonName' in incoming()) &&
-        !('assignedDeliveryPersonPhone' in incoming());
+        !('assignedDeliveryPersonPhone' in incoming()) &&
+        !('assignedDeliveryPersonLocality' in incoming()) &&
+        !('assignmentHistory' in incoming());
       allow update: if isValidId(deliveryId) &&
         isSignedIn() &&
         (
@@ -869,7 +1345,7 @@ service cloud.firestore {
           (
             ('assignedDeliveryPersonId' in existing()) &&
             ('assignedDeliveryPersonId' in incoming()) &&
-            (existing().assignedDeliveryPersonId == request.auth.uid || isApprovedDeliveryOwner(existing().assignedDeliveryPersonId)) &&
+            isApprovedDeliveryOwner(existing().assignedDeliveryPersonId) &&
             incoming().customerId == existing().customerId &&
             incoming().assignedDeliveryPersonId == existing().assignedDeliveryPersonId &&
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
@@ -894,14 +1370,15 @@ service cloud.firestore {
       allow get: if isValidId(providerId) && (isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid));
       allow list: if isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
       allow create: if isValidId(providerId) &&
-        isSignedIn() &&
-        (isAdmin() || (incoming().ownerId == request.auth.uid && incoming().status == 'pending'));
+        isAdmin() &&
+        incoming().name is string && incoming().name.size() <= 120 &&
+        incoming().phone is string && incoming().phone.size() <= 30;
       allow update: if isValidId(providerId) &&
         (
           isAdmin() ||
           (
             isSignedIn() &&
-            existing().ownerId == request.auth.uid &&
+            isApprovedServiceProviderOwner(providerId) &&
             incoming().ownerId == existing().ownerId &&
             incoming().status == existing().status &&
             !incoming().diff(existing()).affectedKeys().hasAny(['status', 'ownerId'])
@@ -911,9 +1388,22 @@ service cloud.firestore {
     }
 
     match /publicServiceProviders/{providerId} {
-      allow get: if isValidId(providerId) && (existing().status == 'approved' || isAdmin());
+      allow get: if isValidId(providerId) && (
+        isAdmin() ||
+        (
+          existing().status == 'approved' &&
+          exists(/databases/$(database)/documents/serviceProviders/$(providerId)) &&
+          get(/databases/$(database)/documents/serviceProviders/$(providerId)).data.status == 'approved' &&
+          ('ownerId' in get(/databases/$(database)/documents/serviceProviders/$(providerId)).data) &&
+          isActivePartnerOwnerAccount(get(/databases/$(database)/documents/serviceProviders/$(providerId)).data.ownerId, 'service_provider', providerId)
+        )
+      );
       allow list: if existing().status == 'approved' || isAdmin();
-      allow create, update: if isValidId(providerId) && isAdmin() && isValidPublicServiceProviderCard(incoming());
+      allow create, update: if isValidId(providerId) &&
+        isAdmin() &&
+        isValidPublicServiceProviderCard(incoming()) &&
+        incoming().id == providerId &&
+        isAfterProviderApprovedWithActiveOwner(providerId, incoming().status);
       allow delete: if isAdmin();
     }
 
@@ -923,7 +1413,6 @@ service cloud.firestore {
         (
           isAdmin() ||
           ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-          ('providerOwnerId' in existing() && existing().providerOwnerId == request.auth.uid) ||
           ('providerId' in existing() && isApprovedServiceProviderOwner(existing().providerId))
         );
       allow list: if isAdmin() ||
@@ -931,7 +1420,7 @@ service cloud.firestore {
           isSignedIn() &&
           (
             ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-            ('providerOwnerId' in existing() && existing().providerOwnerId == request.auth.uid)
+            ('providerId' in existing() && isApprovedServiceProviderOwner(existing().providerId))
           )
         );
       allow create: if isValidId(requestId) &&
@@ -939,10 +1428,14 @@ service cloud.firestore {
         isValidServiceRequestData(incoming()) &&
         incoming().customerId == request.auth.uid &&
         incoming().status == 'requested' &&
+        ('locality' in incoming() && incoming().locality is string && incoming().locality.size() > 0 && incoming().locality.size() <= 120) &&
+        (!('routingStatus' in incoming()) || incoming().routingStatus in ['pending_admin_routing', 'unavailable_in_locality']) &&
         !('providerId' in incoming()) &&
         !('providerOwnerId' in incoming()) &&
         !('providerName' in incoming()) &&
-        !('finalFee' in incoming());
+        !('providerLocality' in incoming()) &&
+        !('finalFee' in incoming()) &&
+        !('assignmentHistory' in incoming());
       allow update: if isValidId(requestId) &&
         isSignedIn() &&
         isValidServiceRequestData(incoming()) &&
@@ -988,21 +1481,29 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // PRIVATE JOBS (EMPLOYER & ADMIN ONLY) & PUBLIC JOB CARDS (STRICT ALLOWLIST)
+    // PRIVATE JOBS (ADMIN-PROVISIONED EMPLOYER & ADMIN ONLY) & PUBLIC JOB CARDS
     // =========================================================================
     match /jobs/{jobId} {
-      allow get: if isValidId(jobId) && (isAdmin() || (isSignedIn() && ('employerId' in existing()) && existing().employerId == request.auth.uid));
-      allow list: if isAdmin() || (isSignedIn() && ('employerId' in existing()) && existing().employerId == request.auth.uid);
+      allow get: if isValidId(jobId) && (isAdmin() || (isSignedIn() && hasPartnerRole(['employer']) && ('employerId' in existing()) && existing().employerId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && hasPartnerRole(['employer']) && ('employerId' in existing()) && existing().employerId == request.auth.uid);
       allow create: if isValidId(jobId) &&
         isSignedIn() &&
         isValidJobData(incoming()) &&
-        (isAdmin() || (incoming().employerId == request.auth.uid && incoming().status == 'pending'));
+        (
+          isAdmin() ||
+          (
+            hasPartnerRole(['employer']) &&
+            incoming().employerId == request.auth.uid &&
+            incoming().status == 'pending'
+          )
+        );
       allow update: if isValidId(jobId) &&
         isSignedIn() &&
         isValidJobData(incoming()) &&
         (
           isAdmin() ||
           (
+            hasPartnerRole(['employer']) &&
             existing().employerId == request.auth.uid &&
             incoming().employerId == existing().employerId &&
             incoming().status == existing().status &&
@@ -1013,9 +1514,22 @@ service cloud.firestore {
     }
 
     match /publicJobs/{jobId} {
-      allow get: if isValidId(jobId) && (existing().status == 'approved' || isAdmin());
+      allow get: if isValidId(jobId) && (
+        isAdmin() ||
+        (
+          existing().status == 'approved' &&
+          exists(/databases/$(database)/documents/jobs/$(jobId)) &&
+          get(/databases/$(database)/documents/jobs/$(jobId)).data.status == 'approved' &&
+          ('employerId' in get(/databases/$(database)/documents/jobs/$(jobId)).data) &&
+          isActiveEmployerAccount(get(/databases/$(database)/documents/jobs/$(jobId)).data.employerId)
+        )
+      );
       allow list: if existing().status == 'approved' || isAdmin();
-      allow create, update: if isValidId(jobId) && isAdmin() && isValidPublicJobCard(incoming());
+      allow create, update: if isValidId(jobId) &&
+        isAdmin() &&
+        isValidPublicJobCard(incoming()) &&
+        incoming().id == jobId &&
+        isAfterJobApprovedWithActiveOwner(jobId, incoming().status);
       allow delete: if isAdmin();
     }
 
@@ -1070,23 +1584,62 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // SCRAP REQUESTS (STRICT CUSTOMER + SELECTED BUYER ISOLATION;
-    // NOTE: Kabari buyer lead routing & offer submission require BACKEND REQUIRED)
+    // SCRAP MARKETPLACE: PII-FREE LISTINGS, PRIVATE REQUESTS, ISOLATED OFFERS
     // =========================================================================
+    match /publicScrapListings/{requestId} {
+      allow get, list: if isAdmin() || hasPartnerRole(['kabari']);
+      allow create: if isValidId(requestId) &&
+        isSignedIn() &&
+        isValidPublicScrapListing(incoming()) &&
+        incoming().id == requestId &&
+        incoming().status == 'open' &&
+        (
+          isAdmin() ||
+          (
+            existsAfter(/databases/$(database)/documents/scrapRequests/$(requestId)) &&
+            getAfter(/databases/$(database)/documents/scrapRequests/$(requestId)).data.customerId == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/scrapRequests/$(requestId)).data.status == 'open' &&
+            getAfter(/databases/$(database)/documents/scrapRequests/$(requestId)).data.locality == incoming().locality
+          )
+        );
+      allow update: if isValidId(requestId) &&
+        isSignedIn() &&
+        isValidPublicScrapListing(incoming()) &&
+        incoming().id == requestId &&
+        (
+          isAdmin() ||
+          (
+            exists(/databases/$(database)/documents/scrapRequests/$(requestId)) &&
+            get(/databases/$(database)/documents/scrapRequests/$(requestId)).data.customerId == request.auth.uid &&
+            incoming().status == 'cancelled' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          ) ||
+          (
+            hasPartnerRole(['kabari']) &&
+            exists(/databases/$(database)/documents/scrapRequests/$(requestId)) &&
+            ('selectedBuyerId' in get(/databases/$(database)/documents/scrapRequests/$(requestId)).data) &&
+            get(/databases/$(database)/documents/scrapRequests/$(requestId)).data.selectedBuyerId == request.auth.uid &&
+            incoming().status in ['pickup_scheduled', 'picked_up', 'completed'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
     match /scrapRequests/{requestId} {
       allow get: if isValidId(requestId) &&
         isSignedIn() &&
         (
           isAdmin() ||
           ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-          ('selectedBuyerId' in existing() && existing().selectedBuyerId == request.auth.uid)
+          (hasPartnerRole(['kabari']) && 'selectedBuyerId' in existing() && existing().selectedBuyerId == request.auth.uid)
         );
       allow list: if isAdmin() ||
         (
           isSignedIn() &&
           (
             ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-            ('selectedBuyerId' in existing() && existing().selectedBuyerId == request.auth.uid)
+            (hasPartnerRole(['kabari']) && 'selectedBuyerId' in existing() && existing().selectedBuyerId == request.auth.uid)
           )
         );
       allow create: if isValidId(requestId) &&
@@ -1094,7 +1647,7 @@ service cloud.firestore {
         isValidScrapRequestData(incoming()) &&
         incoming().customerId == request.auth.uid &&
         incoming().status == 'open' &&
-        incoming().offers.size() == 0 &&
+        (!('offers' in incoming()) || incoming().offers.size() == 0) &&
         !('selectedOfferId' in incoming()) &&
         !('selectedBuyerId' in incoming()) &&
         !('selectedBuyerName' in incoming()) &&
@@ -1111,27 +1664,83 @@ service cloud.firestore {
             !(existing().status in ['completed', 'cancelled']) &&
             incoming().status == 'cancelled' &&
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          ) ||
+          (
+            hasPartnerRole(['kabari']) &&
+            ('selectedBuyerId' in existing()) &&
+            existing().selectedBuyerId == request.auth.uid &&
+            incoming().customerId == existing().customerId &&
+            incoming().selectedBuyerId == existing().selectedBuyerId &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'finalPaidAmount', 'paymentMethod', 'updatedAt']) &&
+            (
+              (existing().status == 'accepted' && incoming().status in ['pickup_scheduled', 'picked_up']) ||
+              (existing().status == 'pickup_scheduled' && incoming().status in ['picked_up', 'completed']) ||
+              (existing().status == 'picked_up' && incoming().status == 'completed')
+            )
           )
         );
       allow delete: if isAdmin();
+
+      match /offers/{offerId} {
+        allow get, list: if isValidId(requestId) &&
+          isValidId(offerId) &&
+          isSignedIn() &&
+          (
+            isAdmin() ||
+            (hasPartnerRole(['kabari']) && ('buyerId' in existing()) && existing().buyerId == request.auth.uid) ||
+            (
+              exists(/databases/$(database)/documents/scrapRequests/$(requestId)) &&
+              get(/databases/$(database)/documents/scrapRequests/$(requestId)).data.customerId == request.auth.uid
+            )
+          );
+        allow create: if isValidId(requestId) &&
+          isValidId(offerId) &&
+          isSignedIn() &&
+          hasPartnerRole(['kabari']) &&
+          isValidScrapOfferData(incoming()) &&
+          incoming().requestId == requestId &&
+          incoming().buyerId == request.auth.uid &&
+          incoming().status == 'pending' &&
+          offerId == (requestId + '_' + request.auth.uid) &&
+          exists(/databases/$(database)/documents/publicScrapListings/$(requestId)) &&
+          get(/databases/$(database)/documents/publicScrapListings/$(requestId)).data.status in ['open', 'offers_received'];
+        allow update: if isValidId(requestId) &&
+          isValidId(offerId) &&
+          isSignedIn() &&
+          isValidScrapOfferData(incoming()) &&
+          (
+            isAdmin() ||
+            (
+              hasPartnerRole(['kabari']) &&
+              existing().buyerId == request.auth.uid &&
+              incoming().buyerId == existing().buyerId &&
+              incoming().requestId == existing().requestId &&
+              existing().status == 'pending' &&
+              incoming().status == 'pending' &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'pricePerKg', 'totalOfferAmount', 'pickupTimeEstimate', 'notes', 'updatedAt'
+              ])
+            )
+          );
+        allow delete: if isAdmin();
+      }
     }
 
     // =========================================================================
-    // PRIVATE DOCTOR PARTNERS (OWNER & ADMIN ONLY) & PUBLIC CARDS
+    // PRIVATE DOCTOR PARTNERS (ADMIN PROVISIONED, OWNER & ADMIN ONLY)
     // =========================================================================
     match /doctors/{doctorId} {
       allow get: if isValidId(doctorId) && (isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid));
       allow list: if isAdmin() || (isSignedIn() && ('ownerId' in existing()) && existing().ownerId == request.auth.uid);
       allow create: if isValidId(doctorId) &&
-        isSignedIn() &&
-        incoming().name is string && incoming().name.size() <= 120 &&
-        (isAdmin() || (incoming().ownerId == request.auth.uid && incoming().status == 'pending'));
+        isAdmin() &&
+        incoming().name is string && incoming().name.size() <= 120;
       allow update: if isValidId(doctorId) &&
         (
           isAdmin() ||
           (
             isSignedIn() &&
-            existing().ownerId == request.auth.uid &&
+            isApprovedDoctorOwner(doctorId) &&
             incoming().ownerId == existing().ownerId &&
             incoming().status == existing().status &&
             !incoming().diff(existing()).affectedKeys().hasAny(['status', 'ownerId'])
@@ -1141,9 +1750,22 @@ service cloud.firestore {
     }
 
     match /publicDoctors/{doctorId} {
-      allow get: if isValidId(doctorId) && (existing().status == 'approved' || isAdmin());
+      allow get: if isValidId(doctorId) && (
+        isAdmin() ||
+        (
+          existing().status == 'approved' &&
+          exists(/databases/$(database)/documents/doctors/$(doctorId)) &&
+          get(/databases/$(database)/documents/doctors/$(doctorId)).data.status == 'approved' &&
+          ('ownerId' in get(/databases/$(database)/documents/doctors/$(doctorId)).data) &&
+          isActivePartnerOwnerAccount(get(/databases/$(database)/documents/doctors/$(doctorId)).data.ownerId, 'doctor', doctorId)
+        )
+      );
       allow list: if existing().status == 'approved' || isAdmin();
-      allow create, update: if isValidId(doctorId) && isAdmin() && isValidPublicDoctorCard(incoming());
+      allow create, update: if isValidId(doctorId) &&
+        isAdmin() &&
+        isValidPublicDoctorCard(incoming()) &&
+        incoming().id == doctorId &&
+        isAfterDoctorApprovedWithActiveOwner(doctorId, incoming().status);
       allow delete: if isAdmin();
     }
 
@@ -1158,7 +1780,6 @@ service cloud.firestore {
           isAdmin() ||
           ('patientUserId' in existing() && existing().patientUserId == request.auth.uid) ||
           ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-          ('doctorId' in existing() && existing().doctorId == request.auth.uid) ||
           ('assignedDoctorId' in existing() && isApprovedDoctorOwner(existing().assignedDoctorId))
         );
       allow list: if isAdmin() ||
@@ -1167,7 +1788,6 @@ service cloud.firestore {
           (
             ('patientUserId' in existing() && existing().patientUserId == request.auth.uid) ||
             ('customerId' in existing() && existing().customerId == request.auth.uid) ||
-            ('doctorId' in existing() && existing().doctorId == request.auth.uid) ||
             ('assignedDoctorId' in existing() && isApprovedDoctorOwner(existing().assignedDoctorId))
           )
         );
@@ -1194,12 +1814,11 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'cancellationReason', 'updatedAt'])
           ) ||
           (
-            (
-              ('doctorId' in existing() && existing().doctorId == request.auth.uid) ||
-              ('assignedDoctorId' in existing() && isApprovedDoctorOwner(existing().assignedDoctorId))
-            ) &&
+            ('assignedDoctorId' in existing()) &&
+            isApprovedDoctorOwner(existing().assignedDoctorId) &&
             incoming().patientUserId == existing().patientUserId &&
-            (!('assignedDoctorId' in existing()) || ('assignedDoctorId' in incoming() && incoming().assignedDoctorId == existing().assignedDoctorId)) &&
+            ('assignedDoctorId' in incoming()) &&
+            incoming().assignedDoctorId == existing().assignedDoctorId &&
             !(existing().status in ['completed', 'cancelled']) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'status', 'estimatedArrivalMinutes', 'etaMinutes', 'doctorNotes', 'notes', 'updatedAt'
@@ -1233,10 +1852,35 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // ADMIN ACTIVITY LOGS & ADMINS REGISTRY (STRICT VERIFIED ADMIN ONLY)
+    // UNIVERSAL LOCALITY ROUTING CONFIG & ALERTS
+    // =========================================================================
+    match /routingConfig/{configId} {
+      allow get: if isValidId(configId);
+      allow list: if true;
+      allow create, update: if isValidId(configId) && isAdmin() && isValidRoutingConfigData(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /routingAlerts/{alertId} {
+      allow get, list, update, delete: if isAdmin();
+      allow create: if isValidId(alertId) &&
+        isSignedIn() &&
+        isValidRoutingAlertData(incoming()) &&
+        incoming().id == alertId &&
+        incoming().status == 'open' &&
+        (isAdmin() || isOwnerOfUnavailableRoutingRequest(incoming()));
+    }
+
+    // =========================================================================
+    // ADMIN ACTIVITY LOGS & ADMINS REGISTRY (APPEND-ONLY VERIFIED ADMIN AUDIT LOGS)
     // =========================================================================
     match /adminActivity/{activityId} {
-      allow read, write: if isAdmin();
+      allow get, list: if isAdmin();
+      allow create: if isValidId(activityId) &&
+        isAdmin() &&
+        isValidAdminActivityData(incoming()) &&
+        incoming().id == activityId;
+      allow update, delete: if false;
     }
 
     match /admins/{adminId} {
