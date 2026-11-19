@@ -14,5 +14,17 @@ registerSW({
   },
 });
 
+if (import.meta.env.DEV && typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker
+    .getRegistration()
+    .then((existing) => {
+      if (!existing) {
+        return navigator.serviceWorker.register('/sw-ride-notifications.js', { scope: '/' });
+      }
+      return existing;
+    })
+    .catch(() => {});
+}
+
 createRoot(document.getElementById('root')!).render(<App />);
 

@@ -11,14 +11,7 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: [
-          'favicon.ico',
-          'apple-touch-icon.png',
-          'icon.svg',
-          'pwa-192x192.png',
-          'pwa-512x512.png',
-          'pwa-maskable-512x512.png'
-        ],
+        includeAssets: [],
         manifest: {
           id: '/',
           name: 'TORSHA BAZAAR',
@@ -52,6 +45,7 @@ export default defineConfig(() => {
           ]
         },
         workbox: {
+          importScripts: ['/sw-ride-notifications.js'],
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           // NEVER cache private user data, auth endpoints, Firestore, or API routes
@@ -85,7 +79,8 @@ export default defineConfig(() => {
           ]
         },
         devOptions: {
-          enabled: true,
+          // vite-plugin-pwa dev registration calls import.meta.hot.send(), which throws when HMR is disabled.
+          enabled: process.env.DISABLE_HMR !== 'true',
           type: 'module'
         }
       })

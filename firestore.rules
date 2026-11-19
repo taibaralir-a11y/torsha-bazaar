@@ -140,6 +140,23 @@ service cloud.firestore {
         get(/databases/$(database)/documents/drivers/$(driverDocId)).data.ownerId == request.auth.uid;
     }
 
+    function callerDriverId() {
+      return get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.linkedEntityId;
+    }
+
+    function isActiveApprovedDriver() {
+      return isSignedIn() &&
+        hasPartnerRole(['driver']) &&
+        ('linkedEntityId' in get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data) &&
+        isValidId(callerDriverId()) &&
+        isApprovedDriverRecord(callerDriverId()) &&
+        get(/databases/$(database)/documents/drivers/$(callerDriverId())).data.ownerId == request.auth.uid;
+    }
+
+    function callerDriverVehicleType() {
+      return get(/databases/$(database)/documents/drivers/$(callerDriverId())).data.vehicleType;
+    }
+
     // Relational delivery rider approval & ownership checks
     function isApprovedRiderRecord(personDocId) {
       return personDocId is string &&
@@ -649,14 +666,73 @@ service cloud.firestore {
         data.status in ['searching', 'pending', 'accepted', 'doctor_on_the_way', 'on_the_way', 'completed', 'cancelled'];
     }
 
-    // Strict non-PII allowlists for dispatch collections (ban customerName, phone, address, symptoms, patientId, private doc refs)
+    // Strict non-PII allowlists for dispatch collections (ban customerName, phone, address, landmarks, symptoms, patientId)
     function isValidRideDispatchData(data) {
-      return data.keys().hasAll(['id', 'vehicleType', 'pickupLocality', 'dropLocality', 'estimatedFare', 'status']) &&
+      return data.keys().hasAll(['id', 'rideId', 'vehicleType', 'pickupLocality', 'dropLocality', 'estimatedFare', 'status']) &&
         data.keys().hasOnly([
-          'id', 'vehicleType', 'pickupLocality', 'dropLocality', 'distanceKm',
-          'estimatedFare', 'customerProposedFare', 'status', 'assignedDriverId',
+          'id', 'rideId', 'customerId', 'vehicleType', 'pickupLocality', 'dropLocality', 'distanceKm',
+          'estimatedFare', 'suggestedFare', 'customerProposedFare',
+          'agreedFare', 'agreedAt', 'confirmedAt', 'status', 'routingStatus',
+          'assignedDriverId', 'confirmedDriverId', 'driverName', 'vehicleNumber', 'driverRating',
+          'eligibleDriverIds', 'rejectedDriverIds', 'activeDriverOffers', 'negotiationHistory',
+          'currentRound', 'maxNegotiationRounds', 'expiresAt', 'expiresAtMs',
           'createdAt', 'updatedAt'
-        ]);
+        ]) &&
+        !('customerName' in data) &&
+        !('customerPhone' in data) &&
+        !('driverPhone' in data) &&
+        !('pickupLocation' in data) &&
+        !('dropLocation' in data) &&
+        !('pickupLandmark' in data) &&
+        !('dropLandmark' in data) &&
+        data.id is string && isValidId(data.id) &&
+        data.rideId is string && isValidId(data.rideId) &&
+        data.vehicleType in ['toto', 'auto', 'taxi'] &&
+        data.pickupLocality is string && data.pickupLocality.size() > 0 && data.pickupLocality.size() <= 120 &&
+        data.dropLocality is string && data.dropLocality.size() > 0 && data.dropLocality.size() <= 120 &&
+        data.estimatedFare is number && data.estimatedFare >= 0 &&
+        (!('customerProposedFare' in data) || (data.customerProposedFare is number && data.customerProposedFare >= 10)) &&
+        (!('agreedFare' in data) || (data.agreedFare is number && data.agreedFare >= 10)) &&
+        (!('expiresAtMs' in data) || (data.expiresAtMs is number && data.expiresAtMs > 0)) &&
+        (!('eligibleDriverIds' in data) || data.eligibleDriverIds is list) &&
+        (!('rejectedDriverIds' in data) || data.rejectedDriverIds is list) &&
+        data.status in [
+          'REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CUSTOMER_ACCEPTED', 'RIDER_ACCEPTED',
+          'CONFIRMED', 'REJECTED', 'EXPIRED', 'CANCELLED', 'PICKUP', 'IN_PROGRESS', 'COMPLETED',
+          'requested', 'searching', 'accepted', 'driver_arriving', 'ride_started', 'completed', 'cancelled'
+        ];
+    }
+
+    function isValidNotificationTokenData(data) {
+      return data.keys().hasAll(['id', 'uid', 'role', 'token', 'fcmEnabled', 'permissionStatus', 'platform', 'channelId', 'active']) &&
+        data.keys().hasOnly([
+          'id', 'uid', 'role', 'entityId', 'vehicleType', 'locality',
+          'token', 'fcmEnabled', 'permissionStatus', 'platform', 'channelId',
+          'active', 'userAgent', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && isValidId(data.id) &&
+        data.uid is string && isValidId(data.uid) &&
+        data.role is string && data.role.size() > 0 && data.role.size() <= 32 &&
+        data.token is string && data.token.size() > 0 && data.token.size() <= 512 &&
+        data.fcmEnabled is bool &&
+        data.active is bool &&
+        data.permissionStatus in ['granted', 'denied', 'default', 'unsupported'] &&
+        data.platform in ['android_pwa', 'web', 'ios_pwa'];
+    }
+
+    function isValidRideNotificationLogData(data) {
+      return data.keys().hasAll(['id', 'rideId', 'recipientRole', 'locality', 'vehicleType', 'channel', 'eventType', 'deliveryStatus', 'dedupKey', 'timestamp']) &&
+        data.keys().hasOnly([
+          'id', 'rideId', 'recipientRole', 'recipientId', 'recipientLabel',
+          'locality', 'vehicleType', 'channel', 'eventType', 'deliveryStatus',
+          'dedupKey', 'timestamp', 'details'
+        ]) &&
+        data.id is string && isValidId(data.id) &&
+        data.rideId is string && isValidId(data.rideId) &&
+        data.recipientRole in ['driver', 'admin', 'customer'] &&
+        data.vehicleType in ['toto', 'auto', 'taxi'] &&
+        data.channel in ['fcm', 'pwa_local', 'in_app'] &&
+        data.deliveryStatus in ['dispatched', 'seen', 'clicked', 'muted', 'failed'];
     }
 
     function isValidDeliveryDispatchData(data) {
@@ -1140,8 +1216,8 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // RIDE BOOKINGS (CUSTOMER, ASSIGNED DRIVER, ADMIN ONLY;
-    // NOTE: Atomic driver claiming & fare confirmation require BACKEND REQUIRED)
+    // RIDE BOOKINGS (CUSTOMER & CONFIRMED DRIVER PII PROTECTED;
+    // ATOMIC SINGLE-WINNER LOCKING SYNCED VIA runTransaction WITH /rideDispatch)
     // =========================================================================
     match /rideBookings/{rideId} {
       allow get: if isValidId(rideId) &&
@@ -1172,7 +1248,7 @@ service cloud.firestore {
         ('dropLocality' in incoming() && incoming().dropLocality is string && incoming().dropLocality.size() > 0 && incoming().dropLocality.size() <= 120) &&
         (!('routingStatus' in incoming()) || incoming().routingStatus in ['pending_admin_routing', 'unavailable_in_locality']) &&
         incoming().estimatedFare is number && incoming().estimatedFare >= 0 &&
-        (!('customerProposedFare' in incoming()) || (incoming().customerProposedFare is number && incoming().customerProposedFare >= 0)) &&
+        (!('customerProposedFare' in incoming()) || (incoming().customerProposedFare is number && incoming().customerProposedFare >= 10)) &&
         !('driverId' in incoming()) &&
         !('driverName' in incoming()) &&
         !('driverPhone' in incoming()) &&
@@ -1183,21 +1259,32 @@ service cloud.firestore {
         !('assignmentHistory' in incoming());
       allow update: if isValidId(rideId) &&
         isSignedIn() &&
+        // IMMUTABLE AGREED FARE LOCK (applies even to Admin once agreedFare is set)
+        (!('agreedFare' in existing()) || existing().agreedFare <= 0 || (('agreedFare' in incoming()) && incoming().agreedFare == existing().agreedFare)) &&
         (
           isAdmin() ||
           (
             existing().customerId == request.auth.uid &&
             incoming().customerId == existing().customerId &&
-            !(existing().status in ['COMPLETED', 'CANCELLED', 'completed', 'cancelled']) &&
+            !(existing().status in ['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'completed', 'cancelled']) &&
             (
               (
                 incoming().status in ['CANCELLED', 'cancelled'] &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'cancelledAt', 'cancelledBy', 'updatedAt'])
+              ) ||
+              (
+                !('driverId' in existing()) &&
+                incoming().status == 'EXPIRED' &&
+                ('expiresAtMs' in existing()) &&
+                request.time.toMillis() > existing().expiresAtMs &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'expiredAt', 'updatedAt'])
               ) ||
               (
                 !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
-                incoming().status in ['REQUESTED', 'OFFER_SENT'] &&
-                (!('customerProposedFare' in incoming()) || (incoming().customerProposedFare is number && incoming().customerProposedFare >= 0)) &&
+                !('driverId' in existing()) &&
+                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+                incoming().status in ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED'] &&
+                (!('customerProposedFare' in incoming()) || (incoming().customerProposedFare is number && incoming().customerProposedFare >= 10)) &&
                 !('driverId' in incoming()) &&
                 !('driverName' in incoming()) &&
                 !('driverPhone' in incoming()) &&
@@ -1207,19 +1294,61 @@ service cloud.firestore {
                 !('agreedFare' in incoming()) &&
                 incoming().diff(existing()).affectedKeys().hasOnly([
                   'status', 'customerProposedFare', 'activeDriverOffers',
-                  'negotiationHistory', 'currentRound', 'updatedAt'
+                  'negotiationHistory', 'currentRound', 'expiresAt', 'expiresAtMs', 'updatedAt'
+                ])
+              ) ||
+              (
+                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
+                !('driverId' in existing()) &&
+                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+                incoming().status == 'CONFIRMED' &&
+                ('driverId' in incoming()) &&
+                isValidId(incoming().driverId) &&
+                ('agreedFare' in incoming()) &&
+                incoming().agreedFare is number &&
+                incoming().agreedFare >= 10 &&
+                existsAfter(/databases/$(database)/documents/rideDispatch/$(rideId)) &&
+                getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.status == 'CONFIRMED' &&
+                getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.confirmedDriverId == incoming().driverId &&
+                getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.agreedFare == incoming().agreedFare &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'routingStatus', 'driverId', 'driverName', 'driverPhone',
+                  'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt', 'confirmedAt',
+                  'activeDriverOffers', 'negotiationHistory', 'updatedAt'
                 ])
               )
             )
           ) ||
           (
+            // Winning Driver atomic confirmation synced in same runTransaction with /rideDispatch/{rideId}
+            !('driverId' in existing()) &&
+            isActiveApprovedDriver() &&
+            !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'accepted', 'driver_arriving', 'ride_started', 'completed', 'cancelled']) &&
+            incoming().customerId == existing().customerId &&
+            incoming().status == 'CONFIRMED' &&
+            ('driverId' in incoming()) &&
+            incoming().driverId == callerDriverId() &&
+            ('agreedFare' in incoming()) &&
+            incoming().agreedFare is number &&
+            incoming().agreedFare >= 10 &&
+            existsAfter(/databases/$(database)/documents/rideDispatch/$(rideId)) &&
+            getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.status == 'CONFIRMED' &&
+            getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.confirmedDriverId == callerDriverId() &&
+            getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.agreedFare == incoming().agreedFare &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'routingStatus', 'driverId', 'driverName', 'driverPhone',
+              'driverLocality', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt', 'confirmedAt',
+              'activeDriverOffers', 'negotiationHistory', 'updatedAt'
+            ])
+          ) ||
+          (
+            // Confirmed Driver trip status progression
             ('driverId' in existing()) &&
             ('driverId' in incoming()) &&
             isApprovedDriverOwner(existing().driverId) &&
             incoming().customerId == existing().customerId &&
             incoming().driverId == existing().driverId &&
-            (!('agreedFare' in existing()) || incoming().agreedFare == existing().agreedFare) &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'completedAt', 'updatedAt']) &&
             (
               (existing().status in ['CONFIRMED', 'accepted'] && incoming().status in ['PICKUP', 'driver_arriving']) ||
               (existing().status in ['PICKUP', 'driver_arriving'] && incoming().status in ['IN_PROGRESS', 'ride_started']) ||
@@ -1833,12 +1962,178 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // DISPATCH PROJECTIONS (LOCKED TO ADMIN UNTIL TRUSTED BACKEND EXISTS;
-    // No customer name, phone, address, medical symptoms, patient ID, or private refs)
+    // NON-PII RIDE DISPATCH PROJECTION & ATOMIC BIDDING WORKSPACE
+    // (No customerName, customerPhone, driverPhone, or street landmarks)
     // =========================================================================
     match /rideDispatch/{dispatchId} {
-      allow read, delete: if isAdmin();
-      allow create, update: if isValidId(dispatchId) && isAdmin() && isValidRideDispatchData(incoming());
+      allow get, list: if isAdmin() ||
+        (
+          isSignedIn() &&
+          (
+            ('customerId' in existing() && existing().customerId == request.auth.uid) ||
+            (
+              isActiveApprovedDriver() &&
+              existing().vehicleType == callerDriverVehicleType() &&
+              (
+                (('eligibleDriverIds' in existing()) && callerDriverId() in existing().eligibleDriverIds) ||
+                (('confirmedDriverId' in existing()) && existing().confirmedDriverId == callerDriverId())
+              )
+            )
+          )
+        );
+      allow create: if isValidId(dispatchId) &&
+        isSignedIn() &&
+        isValidRideDispatchData(incoming()) &&
+        incoming().id == dispatchId &&
+        incoming().rideId == dispatchId &&
+        (
+          isAdmin() ||
+          (
+            incoming().customerId == request.auth.uid &&
+            incoming().status in ['REQUESTED', 'OFFER_SENT'] &&
+            !('confirmedDriverId' in incoming()) &&
+            !('assignedDriverId' in incoming()) &&
+            !('agreedFare' in incoming()) &&
+            existsAfter(/databases/$(database)/documents/rideBookings/$(dispatchId)) &&
+            getAfter(/databases/$(database)/documents/rideBookings/$(dispatchId)).data.customerId == request.auth.uid
+          )
+        );
+      allow update: if isValidId(dispatchId) &&
+        isSignedIn() &&
+        isValidRideDispatchData(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().rideId == existing().rideId &&
+        (!('customerId' in existing()) || incoming().customerId == existing().customerId) &&
+        incoming().vehicleType == existing().vehicleType &&
+        // IMMUTABLE AGREED FARE LOCK (even Admin cannot overwrite locked agreedFare)
+        (!('agreedFare' in existing()) || existing().agreedFare <= 0 || (('agreedFare' in incoming()) && incoming().agreedFare == existing().agreedFare)) &&
+        (
+          isAdmin() ||
+          (
+            ('customerId' in existing()) &&
+            existing().customerId == request.auth.uid &&
+            !(existing().status in ['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'completed', 'cancelled']) &&
+            (
+              (
+                incoming().status in ['CANCELLED', 'cancelled'] &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              ) ||
+              (
+                !('confirmedDriverId' in existing()) &&
+                ('expiresAtMs' in existing()) &&
+                request.time.toMillis() > existing().expiresAtMs &&
+                incoming().status == 'EXPIRED' &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              ) ||
+              (
+                !('confirmedDriverId' in existing()) &&
+                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
+                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+                incoming().status == 'COUNTER_OFFERED' &&
+                !('confirmedDriverId' in incoming()) &&
+                !('assignedDriverId' in incoming()) &&
+                !('agreedFare' in incoming()) &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'customerProposedFare', 'activeDriverOffers',
+                  'negotiationHistory', 'currentRound', 'expiresAt', 'expiresAtMs', 'updatedAt'
+                ])
+              ) ||
+              (
+                !('confirmedDriverId' in existing()) &&
+                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
+                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+                incoming().status == 'CONFIRMED' &&
+                ('confirmedDriverId' in incoming()) &&
+                isValidId(incoming().confirmedDriverId) &&
+                ('agreedFare' in incoming()) &&
+                incoming().agreedFare is number &&
+                incoming().agreedFare >= 10 &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'routingStatus', 'assignedDriverId', 'confirmedDriverId',
+                  'driverName', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt',
+                  'confirmedAt', 'activeDriverOffers', 'negotiationHistory', 'updatedAt'
+                ])
+              )
+            )
+          ) ||
+          (
+            isActiveApprovedDriver() &&
+            existing().vehicleType == callerDriverVehicleType() &&
+            (
+              (('eligibleDriverIds' in existing()) && callerDriverId() in existing().eligibleDriverIds) ||
+              (('confirmedDriverId' in existing()) && existing().confirmedDriverId == callerDriverId())
+            ) &&
+            !(existing().status in ['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'completed', 'cancelled']) &&
+            (
+              (
+                // Driver marks an already timed-out offer as EXPIRED
+                !('confirmedDriverId' in existing()) &&
+                ('expiresAtMs' in existing()) &&
+                request.time.toMillis() > existing().expiresAtMs &&
+                incoming().status == 'EXPIRED' &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              ) ||
+              (
+                // Driver declines pending ride (recorded on rejectedDriverIds; status becomes REJECTED only when no other eligible driver remains)
+                !('confirmedDriverId' in existing()) &&
+                !('agreedFare' in incoming()) &&
+                !('confirmedDriverId' in incoming()) &&
+                incoming().status in [existing().status, 'REJECTED'] &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'rejectedDriverIds', 'activeDriverOffers', 'negotiationHistory', 'status', 'updatedAt'
+                ])
+              ) ||
+              (
+                // Driver sends counter offer before expiry & lock
+                !('confirmedDriverId' in existing()) &&
+                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
+                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+                incoming().status == 'COUNTER_OFFERED' &&
+                !('confirmedDriverId' in incoming()) &&
+                !('agreedFare' in incoming()) &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'currentRound', 'activeDriverOffers', 'negotiationHistory',
+                  'expiresAt', 'expiresAtMs', 'updatedAt'
+                ])
+              ) ||
+              (
+                // ATOMIC SINGLE-WINNER LOCK ON DISPATCH
+                !('confirmedDriverId' in existing()) &&
+                !('assignedDriverId' in existing()) &&
+                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
+                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+                incoming().status == 'CONFIRMED' &&
+                incoming().confirmedDriverId == callerDriverId() &&
+                incoming().assignedDriverId == callerDriverId() &&
+                ('agreedFare' in incoming()) &&
+                incoming().agreedFare is number &&
+                incoming().agreedFare >= 10 &&
+                (
+                  incoming().agreedFare == existing().customerProposedFare ||
+                  incoming().agreedFare == existing().estimatedFare
+                ) &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'routingStatus', 'assignedDriverId', 'confirmedDriverId',
+                  'driverName', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt',
+                  'confirmedAt', 'activeDriverOffers', 'negotiationHistory', 'updatedAt'
+                ])
+              ) ||
+              (
+                // Confirmed driver advances ride stages on dispatch summary
+                ('confirmedDriverId' in existing()) &&
+                existing().confirmedDriverId == callerDriverId() &&
+                incoming().confirmedDriverId == existing().confirmedDriverId &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+                (
+                  (existing().status in ['CONFIRMED', 'accepted'] && incoming().status in ['PICKUP', 'driver_arriving']) ||
+                  (existing().status in ['PICKUP', 'driver_arriving'] && incoming().status in ['IN_PROGRESS', 'ride_started']) ||
+                  (existing().status in ['IN_PROGRESS', 'ride_started'] && incoming().status in ['COMPLETED', 'completed'])
+                )
+              )
+            )
+          )
+        );
+      allow delete: if isAdmin();
     }
 
     match /deliveryDispatch/{dispatchId} {
@@ -1886,6 +2181,34 @@ service cloud.firestore {
     match /admins/{adminId} {
       allow read: if isAdmin();
       allow write: if false;
+    }
+
+    // =========================================================================
+    // PUSH NOTIFICATION TOKENS & RIDE DELIVERY LOGS
+    // =========================================================================
+    match /notificationTokens/{tokenId} {
+      allow get, list: if isAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+      allow create, update: if isValidId(tokenId) &&
+        isSignedIn() &&
+        incoming().uid == request.auth.uid &&
+        isValidNotificationTokenData(incoming());
+      allow delete: if isAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+    }
+
+    match /rideNotificationLogs/{logId} {
+      allow get, list: if isAdmin() || (isSignedIn() && ('recipientId' in existing()) && existing().recipientId == request.auth.uid);
+      allow create, update: if isValidId(logId) &&
+        isSignedIn() &&
+        isValidRideNotificationLogData(incoming()) &&
+        (
+          isAdmin() ||
+          isActiveApprovedDriver() ||
+          (
+            exists(/databases/$(database)/documents/rideBookings/$(incoming().rideId)) &&
+            get(/databases/$(database)/documents/rideBookings/$(incoming().rideId)).data.customerId == request.auth.uid
+          )
+        );
+      allow delete: if isAdmin();
     }
   }
 }

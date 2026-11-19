@@ -448,19 +448,37 @@
     },
     "RideDispatchSummary": {
       "title": "RideDispatchSummary",
-      "description": "Non-PII dispatch summary projection for Taxi, Auto, and Toto requests prior to assignment",
+      "description": "Non-PII dispatch summary projection for Taxi, Auto, and Toto requests with atomic single-winner locking",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "rideId": { "type": "string" },
+        "customerId": { "type": "string" },
         "vehicleType": { "type": "string", "enum": ["taxi", "auto", "toto"] },
         "pickupLocality": { "type": "string" },
         "dropLocality": { "type": "string" },
+        "distanceKm": { "type": "number" },
         "estimatedFare": { "type": "number" },
+        "suggestedFare": { "type": "number" },
         "customerProposedFare": { "type": "number" },
+        "agreedFare": { "type": "number" },
+        "agreedAt": { "type": "string" },
+        "confirmedAt": { "type": "string" },
         "status": { "type": "string" },
+        "routingStatus": { "type": "string" },
         "assignedDriverId": { "type": "string" },
-        "createdAt": { "type": "string" }
+        "confirmedDriverId": { "type": "string" },
+        "driverName": { "type": "string" },
+        "vehicleNumber": { "type": "string" },
+        "driverRating": { "type": "number" },
+        "eligibleDriverIds": { "type": "array" },
+        "rejectedDriverIds": { "type": "array" },
+        "currentRound": { "type": "number" },
+        "maxNegotiationRounds": { "type": "number" },
+        "expiresAt": { "type": "string" },
+        "expiresAtMs": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
       },
       "required": ["id", "rideId", "vehicleType", "pickupLocality", "dropLocality", "estimatedFare", "status"]
     },
@@ -747,6 +765,47 @@
         "resolvedAt": { "type": "string" }
       },
       "required": ["id", "requestId", "serviceCategory", "requestLocality", "message", "status", "createdAt"]
+    },
+    "NotificationTokenRecord": {
+      "title": "NotificationTokenRecord",
+      "description": "Registered PWA / FCM push token metadata for riders, drivers, customers, and admins",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "role": { "type": "string" },
+        "entityId": { "type": "string" },
+        "vehicleType": { "type": "string", "enum": ["toto", "auto", "taxi"] },
+        "locality": { "type": "string" },
+        "token": { "type": "string" },
+        "fcmEnabled": { "type": "boolean" },
+        "permissionStatus": { "type": "string", "enum": ["granted", "denied", "default", "unsupported"] },
+        "platform": { "type": "string", "enum": ["android_pwa", "web", "ios_pwa"] },
+        "channelId": { "type": "string" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "uid", "role", "token", "fcmEnabled", "permissionStatus", "platform", "channelId", "active"]
+    },
+    "RideNotificationLog": {
+      "title": "RideNotificationLog",
+      "description": "Ride dispatch notification delivery audit log",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "rideId": { "type": "string" },
+        "recipientRole": { "type": "string", "enum": ["driver", "admin", "customer"] },
+        "recipientId": { "type": "string" },
+        "locality": { "type": "string" },
+        "vehicleType": { "type": "string", "enum": ["toto", "auto", "taxi"] },
+        "channel": { "type": "string", "enum": ["fcm", "pwa_local", "in_app"] },
+        "eventType": { "type": "string" },
+        "deliveryStatus": { "type": "string", "enum": ["dispatched", "seen", "clicked", "muted", "failed"] },
+        "dedupKey": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "rideId", "recipientRole", "locality", "vehicleType", "channel", "eventType", "deliveryStatus", "dedupKey", "timestamp"]
     }
   },
   "firestore": {
@@ -778,11 +837,13 @@
     "/publicScrapListings/{requestId}": { "schema": "PublicScrapListing", "description": "PII-free open scrap summaries visible to active Kabari buyers" },
     "/scrapRequests/{requestId}": { "schema": "ScrapRequest", "description": "Private customer & assigned buyer scrap pickup requests" },
     "/scrapRequests/{requestId}/offers/{offerId}": { "schema": "ScrapOffer", "description": "Isolated Kabari buyer quotes per requestId_uid" },
-    "/rideDispatch/{dispatchId}": { "schema": "RideDispatchSummary", "description": "Non-PII ride dispatch feed (Admin/Backend locked)" },
+    "/rideDispatch/{dispatchId}": { "schema": "RideDispatchSummary", "description": "Non-PII ride dispatch feed & atomic locking workspace" },
     "/deliveryDispatch/{dispatchId}": { "schema": "DeliveryDispatchSummary", "description": "Non-PII delivery dispatch feed (Admin/Backend locked)" },
     "/emergencyDispatch/{dispatchId}": { "schema": "EmergencyDispatchSummary", "description": "Non-PII emergency dispatch feed (Admin/Backend locked)" },
     "/routingConfig/{configId}": { "schema": "UniversalRoutingConfig", "description": "Admin-managed locality routing matrix and cross-locality controls" },
     "/routingAlerts/{alertId}": { "schema": "RoutingAlert", "description": "Super Admin unresolved locality routing alerts" },
-    "/adminActivity/{activityId}": { "schema": "AdminActivity", "description": "Verified Super Admin audit logs" }
+    "/adminActivity/{activityId}": { "schema": "AdminActivity", "description": "Verified Super Admin audit logs" },
+    "/notificationTokens/{tokenId}": { "schema": "NotificationTokenRecord", "description": "PWA & FCM push token registrations per UID and portal role" },
+    "/rideNotificationLogs/{logId}": { "schema": "RideNotificationLog", "description": "Ride dispatch notification alert & delivery logs" }
   }
 }

@@ -15,7 +15,9 @@ import {
   PublicRiderCard,
   PublicDriverCard,
   PublicScrapListing,
-  PartnerAccountStatus
+  PartnerAccountStatus,
+  RideBooking,
+  RideDispatchSummary
 } from '../types';
 
 /**
@@ -415,5 +417,130 @@ export function fromPublicScrapListing(card: PublicScrapListing): ScrapRequest {
     offers: [],
     createdAt: card.createdAt,
     updatedAt: card.updatedAt
+  };
+}
+
+/**
+ * Strict PII-free allowlist projection for /rideDispatch/{rideId}.
+ * NEVER includes customerName, customerPhone, driverPhone, pickupLocation street landmark,
+ * pickupLandmark, dropLocation street landmark, or dropLandmark.
+ */
+export function toRideDispatchSummary(booking: RideBooking): RideDispatchSummary {
+  const createdAt = booking.createdAt || new Date().toISOString();
+  const expiresAtMs =
+    typeof booking.expiresAtMs === 'number'
+      ? booking.expiresAtMs
+      : booking.expiresAt
+      ? Date.parse(booking.expiresAt) || Date.now() + 3 * 60 * 1000
+      : Date.now() + 3 * 60 * 1000;
+
+  const summary: RideDispatchSummary = {
+    id: booking.id,
+    rideId: booking.id,
+    vehicleType: booking.vehicleType,
+    pickupLocality: booking.pickupLocality || booking.pickupLocation || 'Satali',
+    dropLocality: booking.dropLocality || booking.dropLocation || 'Hasimara',
+    estimatedFare: Number(booking.estimatedFare || booking.suggestedFare || 0),
+    status: booking.status,
+    createdAt,
+    updatedAt: booking.updatedAt || new Date().toISOString(),
+    expiresAtMs,
+    expiresAt: booking.expiresAt || new Date(expiresAtMs).toISOString()
+  };
+
+  if (booking.customerId) summary.customerId = booking.customerId;
+  if (typeof booking.distanceKm === 'number') summary.distanceKm = booking.distanceKm;
+  if (typeof booking.suggestedFare === 'number') summary.suggestedFare = booking.suggestedFare;
+  if (typeof booking.customerProposedFare === 'number') summary.customerProposedFare = booking.customerProposedFare;
+  if (typeof booking.agreedFare === 'number') summary.agreedFare = booking.agreedFare;
+  if (booking.agreedAt) summary.agreedAt = booking.agreedAt;
+  if (booking.confirmedAt) summary.confirmedAt = booking.confirmedAt;
+  if (booking.routingStatus) summary.routingStatus = booking.routingStatus;
+  if (booking.driverId) {
+    summary.assignedDriverId = booking.driverId;
+    summary.confirmedDriverId = booking.driverId;
+  }
+  if (booking.driverName) summary.driverName = booking.driverName;
+  if (booking.vehicleNumber) summary.vehicleNumber = booking.vehicleNumber;
+  if (typeof booking.driverRating === 'number') summary.driverRating = booking.driverRating;
+  if (Array.isArray(booking.eligibleDriverIds)) summary.eligibleDriverIds = booking.eligibleDriverIds;
+  if (Array.isArray(booking.rejectedDriverIds)) summary.rejectedDriverIds = booking.rejectedDriverIds;
+  if (Array.isArray(booking.activeDriverOffers)) {
+    summary.activeDriverOffers = booking.activeDriverOffers.map(({ driverPhone: _dp, ...rest }) => rest);
+  }
+  if (Array.isArray(booking.negotiationHistory)) {
+    summary.negotiationHistory = booking.negotiationHistory.map(({ driverPhone: _dp, ...rest }) => rest);
+  }
+  if (typeof booking.currentRound === 'number') summary.currentRound = booking.currentRound;
+  if (typeof booking.maxNegotiationRounds === 'number') summary.maxNegotiationRounds = booking.maxNegotiationRounds;
+
+  return summary;
+}
+
+export function mergeRideDispatchWithBooking(
+  dispatch: RideDispatchSummary,
+  booking?: RideBooking | null
+): RideBooking {
+  if (booking) {
+    const dispatchUpdated = Date.parse(dispatch.updatedAt || dispatch.createdAt || '') || 0;
+    const bookingUpdated = Date.parse(booking.updatedAt || booking.createdAt || '') || 0;
+    const useDispatchState = dispatchUpdated >= bookingUpdated;
+    return {
+      ...booking,
+      status: useDispatchState ? dispatch.status : booking.status,
+      agreedFare: booking.agreedFare ?? dispatch.agreedFare,
+      agreedAt: booking.agreedAt || dispatch.agreedAt,
+      confirmedAt: booking.confirmedAt || dispatch.confirmedAt,
+      customerProposedFare: dispatch.customerProposedFare ?? booking.customerProposedFare,
+      driverId: booking.driverId || dispatch.confirmedDriverId || dispatch.assignedDriverId,
+      driverName: booking.driverName || dispatch.driverName,
+      vehicleNumber: booking.vehicleNumber || dispatch.vehicleNumber,
+      driverRating: booking.driverRating ?? dispatch.driverRating,
+      eligibleDriverIds: dispatch.eligibleDriverIds ?? booking.eligibleDriverIds,
+      rejectedDriverIds: dispatch.rejectedDriverIds ?? booking.rejectedDriverIds,
+      activeDriverOffers: dispatch.activeDriverOffers ?? booking.activeDriverOffers,
+      negotiationHistory: dispatch.negotiationHistory ?? booking.negotiationHistory,
+      currentRound: dispatch.currentRound ?? booking.currentRound,
+      maxNegotiationRounds: dispatch.maxNegotiationRounds ?? booking.maxNegotiationRounds,
+      expiresAt: dispatch.expiresAt ?? booking.expiresAt,
+      expiresAtMs: dispatch.expiresAtMs ?? booking.expiresAtMs,
+      routingStatus: dispatch.routingStatus ?? booking.routingStatus,
+      updatedAt: useDispatchState ? dispatch.updatedAt : booking.updatedAt
+    };
+  }
+
+  return {
+    id: dispatch.rideId || dispatch.id,
+    customerId: dispatch.customerId,
+    customerName: 'Local Passenger (Verified)',
+    customerPhone: '',
+    vehicleType: dispatch.vehicleType,
+    pickupLocation: dispatch.pickupLocality,
+    pickupLocality: dispatch.pickupLocality,
+    dropLocation: dispatch.dropLocality,
+    dropLocality: dispatch.dropLocality,
+    distanceKm: dispatch.distanceKm,
+    estimatedFare: dispatch.estimatedFare,
+    suggestedFare: dispatch.suggestedFare,
+    customerProposedFare: dispatch.customerProposedFare,
+    agreedFare: dispatch.agreedFare,
+    agreedAt: dispatch.agreedAt,
+    confirmedAt: dispatch.confirmedAt,
+    status: dispatch.status,
+    routingStatus: dispatch.routingStatus,
+    driverId: dispatch.confirmedDriverId || dispatch.assignedDriverId,
+    driverName: dispatch.driverName,
+    vehicleNumber: dispatch.vehicleNumber,
+    driverRating: dispatch.driverRating,
+    eligibleDriverIds: dispatch.eligibleDriverIds,
+    rejectedDriverIds: dispatch.rejectedDriverIds,
+    activeDriverOffers: dispatch.activeDriverOffers,
+    negotiationHistory: dispatch.negotiationHistory,
+    currentRound: dispatch.currentRound,
+    maxNegotiationRounds: dispatch.maxNegotiationRounds,
+    expiresAt: dispatch.expiresAt,
+    expiresAtMs: dispatch.expiresAtMs,
+    createdAt: dispatch.createdAt,
+    updatedAt: dispatch.updatedAt
   };
 }

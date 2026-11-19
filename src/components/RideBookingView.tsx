@@ -17,6 +17,12 @@ import {
   getDistanceBetween,
   resolveAreaKey
 } from '../utils/hyperlocalRouting';
+import {
+  getRideRemainingSeconds,
+  hasActiveUnresolvedCustomerRide,
+  isRideOfferExpired,
+  normalizeRideStatus
+} from '../utils/rideLifecycle';
 import { 
   ArrowLeft, 
   MapPin, 
@@ -36,7 +42,10 @@ import {
   TrendingUp,
   User,
   Star,
-  ChevronRight
+  ChevronRight,
+  Bell,
+  WifiOff,
+  Lock
 } from 'lucide-react';
 
 interface RideActionResult {
@@ -63,6 +72,11 @@ interface RideBookingViewProps {
   routingConfig?: UniversalRoutingConfig;
   partnerAccounts?: PartnerAccount[];
   localities?: LocalityInfo[];
+  focusedRideId?: string | null;
+  onExpireRide?: (rideId: string) => Promise<RideActionResult | void> | void;
+  onRequestNotifications?: () => Promise<void> | void;
+  notificationPermission?: 'granted' | 'denied' | 'default' | 'unsupported';
+  isOnlineNetwork?: boolean;
 }
 
 export const RideBookingView: React.FC<RideBookingViewProps> = ({
@@ -82,17 +96,24 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
   approvedDrivers = [],
   routingConfig,
   partnerAccounts = [],
-  localities
+  localities,
+  focusedRideId,
+  onExpireRide,
+  onRequestNotifications,
+  notificationPermission = 'default',
+  isOnlineNetwork = true
 }) => {
   const [selectedVehicle, setSelectedVehicle] = useState<VehicleType>(initialVehicleType);
   const [pickup, setPickup] = useState(currentLocation || 'Hasimara');
   const [pickupLandmark, setPickupLandmark] = useState('');
   const [drop, setDrop] = useState('Kalchini Market');
   const [dropLandmark, setDropLandmark] = useState('');
-  const [customerActiveBookingId, setCustomerActiveBookingId] = useState<string | null>(null);
+  const [customerActiveBookingId, setCustomerActiveBookingId] = useState<string | null>(focusedRideId || null);
+  const [dismissedTerminalIds, setDismissedTerminalIds] = useState<string[]>([]);
   const [rideActionError, setRideActionError] = useState<string | null>(null);
   const [confirmCancelRideId, setConfirmCancelRideId] = useState<string | null>(null);
   const [isSubmittingRide, setIsSubmittingRide] = useState(false);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   const pickupArea = resolveAreaKey(pickup, localities);
   const dropArea = resolveAreaKey(drop, localities);
@@ -157,12 +178,9 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
   const [showCounterModal, setShowCounterModal] = useState<boolean>(false);
   const [activeNegotiatingOffer, setActiveNegotiatingOffer] = useState<FareOffer | null>(null);
 
-  // Expiration timer simulated state
-  const [secondsRemaining, setSecondsRemaining] = useState<number>(90);
-
   useEffect(() => {
-    setCustomerActiveBookingId(null);
-  }, [customerId]);
+    setCustomerActiveBookingId(focusedRideId || null);
+  }, [customerId, focusedRideId]);
 
   // Update proposed fare default when vehicle or route changes if user hasn't typed custom
   useEffect(() => {
@@ -172,41 +190,65 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
   }, [suggestedFare, isCustomFareInput]);
 
   // Find currently active booking for customer strictly by authenticated customerId
-  const liveBooking = rideBookings.find(
-    (b) => Boolean(customerId) &&
-           b.customerId === customerId &&
-           (b.id === customerActiveBookingId ||
-            ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started'].includes(b.status))
-  ) || null;
+  const activeUnresolvedRide = hasActiveUnresolvedCustomerRide(rideBookings, customerId, nowMs) || null;
+  const focusedOrTrackedRide =
+    rideBookings.find(
+      (b) =>
+        Boolean(customerId) &&
+        b.customerId === customerId &&
+        !dismissedTerminalIds.includes(b.id) &&
+        ((focusedRideId && b.id === focusedRideId) || (customerActiveBookingId && b.id === customerActiveBookingId))
+    ) || null;
+  const liveBooking = activeUnresolvedRide || focusedOrTrackedRide;
 
-  // Real-time timer countdown for pending offers
+  const secondsRemaining = liveBooking ? getRideRemainingSeconds(liveBooking, nowMs) : 0;
+
+  // Real-time timer countdown & automatic expiry trigger for pending offers
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (liveBooking && (liveBooking.status === 'COUNTER_OFFERED' || liveBooking.status === 'REQUESTED' || liveBooking.status === 'OFFER_SENT')) {
-      timer = setInterval(() => {
-        setSecondsRemaining((prev) => (prev > 0 ? prev - 1 : 0));
-      }, 1000);
-    } else {
-      setSecondsRemaining(90);
+    if (!liveBooking) return;
+    const canonical = normalizeRideStatus(liveBooking.status);
+    if (!['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CUSTOMER_ACCEPTED', 'RIDER_ACCEPTED'].includes(canonical)) {
+      return;
     }
-    return () => clearInterval(timer);
-  }, [liveBooking?.status, liveBooking?.id]);
+    const timer = window.setInterval(() => {
+      const t = Date.now();
+      setNowMs(t);
+      if (isRideOfferExpired(liveBooking, t) && onExpireRide) {
+        onExpireRide(liveBooking.id);
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [liveBooking?.status, liveBooking?.id, liveBooking?.expiresAtMs, onExpireRide]);
 
   // Submit initial ride booking with Customer's proposed fare
   const handleInitiateRideRequest = async () => {
     if (isSubmittingRide) return;
+    if (!isOnlineNetwork) {
+      setRideActionError('You appear offline. Please reconnect to submit a ride booking.');
+      return;
+    }
+    if (activeUnresolvedRide) {
+      setCustomerActiveBookingId(activeUnresolvedRide.id);
+      setRideActionError(`You already have an active ride (${activeUnresolvedRide.id}). Please finish or cancel it first.`);
+      return;
+    }
     setRideActionError(null);
     const rideId = `TB-RIDE-${Math.floor(1000 + Math.random() * 9000)}`;
     const finalProposed = Number(proposedFare) > 0 ? Number(proposedFare) : suggestedFare;
+    const nowTs = Date.now();
+    const expMs = nowTs + 180000;
+    const expIso = new Date(expMs).toISOString();
 
     const initialOffer: FareOffer = {
-      id: `offer-${Date.now()}-c1`,
+      id: `offer-${nowTs}-c1`,
       offeredBy: 'customer',
       amount: finalProposed,
       status: 'pending',
-      timestamp: new Date().toISOString(),
+      action: 'OFFER_SENT',
+      timestamp: new Date(nowTs).toISOString(),
       roundNumber: 1,
-      expiresAt: new Date(Date.now() + 180000).toISOString()
+      expiresAt: expIso,
+      expiresAtMs: expMs
     };
 
     const newBooking: RideBooking = {
@@ -252,22 +294,32 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
     }
   };
 
-  const isConfirmed = liveBooking && (
-    liveBooking.status === 'CONFIRMED' || 
-    liveBooking.status === 'PICKUP' || 
-    liveBooking.status === 'IN_PROGRESS' || 
-    liveBooking.status === 'accepted' || 
-    liveBooking.status === 'driver_arriving' || 
-    liveBooking.status === 'ride_started'
+  const canonicalLiveStatus = liveBooking ? normalizeRideStatus(liveBooking.status) : null;
+
+  const isConfirmed = Boolean(
+    liveBooking &&
+      (canonicalLiveStatus === 'CONFIRMED' ||
+        canonicalLiveStatus === 'PICKUP' ||
+        canonicalLiveStatus === 'IN_PROGRESS')
   );
 
-  const isNegotiating = liveBooking && (
-    liveBooking.status === 'REQUESTED' || 
-    liveBooking.status === 'OFFER_SENT' || 
-    liveBooking.status === 'COUNTER_OFFERED'
+  const isNegotiating = Boolean(
+    liveBooking &&
+      (canonicalLiveStatus === 'REQUESTED' ||
+        canonicalLiveStatus === 'OFFER_SENT' ||
+        canonicalLiveStatus === 'COUNTER_OFFERED' ||
+        canonicalLiveStatus === 'CUSTOMER_ACCEPTED' ||
+        canonicalLiveStatus === 'RIDER_ACCEPTED')
   );
 
-  const latestDriverOffer = liveBooking?.activeDriverOffers?.[0] || 
+  const isTerminalClosed = Boolean(
+    liveBooking &&
+      (canonicalLiveStatus === 'EXPIRED' ||
+        canonicalLiveStatus === 'REJECTED' ||
+        canonicalLiveStatus === 'CANCELLED')
+  );
+
+  const latestDriverOffer = liveBooking?.activeDriverOffers?.find((o) => o.status === 'pending') ||
     liveBooking?.negotiationHistory?.filter((o) => o.offeredBy === 'driver' && o.status === 'pending').slice(-1)[0];
 
   return (
@@ -292,6 +344,29 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
       </div>
 
       <div className="p-4 space-y-4">
+        {!isOnlineNetwork && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-2xl p-3 text-xs font-semibold flex items-center gap-2">
+            <WifiOff className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>You are offline. Ride updates will automatically resync as soon as connection returns.</span>
+          </div>
+        )}
+
+        {onRequestNotifications && notificationPermission !== 'granted' && notificationPermission !== 'unsupported' && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 flex items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 text-emerald-900">
+              <Bell className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>Enable instant alerts to get notified when a local driver accepts or sends a counter-offer.</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => onRequestNotifications()}
+              className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl shrink-0 text-[11px]"
+            >
+              Enable Alerts
+            </button>
+          </div>
+        )}
+
         {rideActionError && (
           <div className="bg-rose-50 border border-rose-200 text-rose-900 rounded-2xl p-3 text-xs font-semibold flex items-start justify-between gap-2">
             <div className="flex items-start gap-2">
@@ -307,8 +382,34 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
             </button>
           </div>
         )}
-        {/* CASE 1: MUTUALLY CONFIRMED RIDE */}
-        {isConfirmed && liveBooking ? (
+
+        {/* CASE 0: TERMINAL EXPIRED / REJECTED / CANCELLED SUMMARY */}
+        {isTerminalClosed && liveBooking ? (
+          <div className="bg-white rounded-2xl border-2 border-slate-300 p-5 shadow-md space-y-3 text-center">
+            <XCircle className="w-10 h-10 text-rose-500 mx-auto" />
+            <h3 className="font-bold text-gray-900 text-base">
+              {canonicalLiveStatus === 'EXPIRED'
+                ? 'Ride Offer Window Expired'
+                : canonicalLiveStatus === 'REJECTED'
+                ? 'No Drivers Available in Locality'
+                : 'Ride Request Cancelled'}
+            </h3>
+            <p className="text-xs text-gray-600">
+              Ride <span className="font-mono font-bold">{liveBooking.id}</span> ({liveBooking.pickupLocality || liveBooking.pickupLocation} → {liveBooking.dropLocality || liveBooking.dropLocation}) ended with status <strong>{canonicalLiveStatus}</strong>.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setDismissedTerminalIds((prev) => [...prev, liveBooking.id]);
+                setCustomerActiveBookingId(null);
+              }}
+              className="w-full py-2.5 bg-[#0E7438] hover:bg-emerald-800 text-white font-bold rounded-xl text-xs"
+            >
+              Book Another Ride
+            </button>
+          </div>
+        ) : /* CASE 1: MUTUALLY CONFIRMED RIDE */
+        isConfirmed && liveBooking ? (
           <div className="bg-white rounded-2xl border-2 border-emerald-500 p-5 shadow-md space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-gray-100">
               <div className="flex items-center gap-2 text-emerald-700 font-bold text-sm">
@@ -334,7 +435,8 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
                   ₹{liveBooking.agreedFare || liveBooking.customerProposedFare || liveBooking.estimatedFare}
                 </span>
               </div>
-              <span className="text-xs bg-emerald-600 text-white font-bold px-2.5 py-1 rounded-lg">
+              <span className="text-xs bg-emerald-600 text-white font-bold px-2.5 py-1 rounded-lg flex items-center gap-1">
+                <Lock className="w-3.5 h-3.5" />
                 Mutual Fare Agreement Locked
               </span>
             </div>

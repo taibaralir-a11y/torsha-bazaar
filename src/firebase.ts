@@ -18,7 +18,7 @@ import { getFirestore, doc, getDoc, getDocFromServer, setDoc, updateDoc, SetOpti
 import firebaseConfig from '../firebase-applet-config.json';
 import { normalizePhoneE164 } from './utils/phone';
 
-const app = initializeApp(firebaseConfig);
+export const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 

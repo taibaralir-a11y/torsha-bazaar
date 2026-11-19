@@ -151,8 +151,42 @@ import {
   toPublicRiderCard,
   toPublicDriverCard,
   fromPublicDriverCard,
-  toPublicScrapListing
+  toPublicScrapListing,
+  toRideDispatchSummary,
+  mergeRideDispatchWithBooking
 } from './utils/directorySanitizer';
+
+import {
+  buildNewRideRequestBundle,
+  canTransitionRideStatus,
+  getActionableRidesForAdmin,
+  getActionableRidesForDriver,
+  getPendingAlertSignature,
+  isRideOfferExpired,
+  normalizeRideStatus,
+  prepareCustomerAcceptOfferTransaction,
+  prepareCustomerCounterBackPatch,
+  prepareDriverAcceptTransaction,
+  prepareDriverCounterOfferPatch,
+  assertAgreedFareImmutable
+} from './utils/rideLifecycle';
+import { rideAlertAudio } from './utils/rideAlertAudio';
+import {
+  attachForegroundFcmListener,
+  closeRideSystemNotification,
+  deactivateNotificationTokensForUser,
+  getBrowserNotificationPermission,
+  isFcmVapidConfigured,
+  parseRideDeepLinkFromUrl,
+  recordRideNotificationLog,
+  requestAndRegisterPushNotification,
+  showRideSystemNotification
+} from './utils/pushNotifications';
+import {
+  RideDispatchSummary,
+  NotificationTokenRecord,
+  RideNotificationLog
+} from './types';
 
 import { 
   db, 
@@ -167,7 +201,7 @@ import {
   hashPhoneForLookup
 } from './firebase';
 import { onAuthStateChanged, getRedirectResult, signOut, User } from 'firebase/auth';
-import { doc, deleteDoc, deleteField, collection, onSnapshot, query, where, getDoc, getDocs, writeBatch } from 'firebase/firestore';
+import { doc, deleteDoc, deleteField, collection, onSnapshot, query, where, getDoc, getDocs, writeBatch, runTransaction } from 'firebase/firestore';
 import { normalizePhoneE164, phonesMatchNormalized } from './utils/phone';
 
 const isAdminUrlPath = (): boolean => {
@@ -348,8 +382,22 @@ export default function App() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [currentDriver, setCurrentDriver] = useState<Driver>(() => ({ ...EMPTY_DRIVER }));
 
-  // RIDE BOOKINGS STATE (never seeded from demo bookings or shared localStorage)
+  // RIDE BOOKINGS & DISPATCH STATE (never seeded from demo bookings or shared localStorage)
+  const [rawPrivateRides, setRawPrivateRides] = useState<RideBooking[]>([]);
+  const [rideDispatchSummaries, setRideDispatchSummaries] = useState<RideDispatchSummary[]>([]);
   const [rideBookings, setRideBookings] = useState<RideBooking[]>([]);
+  const [notificationTokens, setNotificationTokens] = useState<NotificationTokenRecord[]>([]);
+  const [rideNotificationLogs, setRideNotificationLogs] = useState<RideNotificationLog[]>([]);
+  const [focusedRideId, setFocusedRideId] = useState<string | null>(
+    () => parseRideDeepLinkFromUrl().rideId || null
+  );
+  const [notificationPermission, setNotificationPermission] = useState<
+    'granted' | 'denied' | 'default' | 'unsupported'
+  >(() => getBrowserNotificationPermission());
+  const [isOnlineNetwork, setIsOnlineNetwork] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [, setAudioStateVersion] = useState<number>(0);
 
   // DELIVERY FLEET STATE
   const [deliveryPersons, setDeliveryPersons] = useState<DeliveryPerson[]>([]);
@@ -457,6 +505,15 @@ export default function App() {
   const kabariScrapRequestsRef = useRef<ScrapRequest[]>([]);
   const scrapOffersByReqRef = useRef<Map<string, ScrapOffer[]>>(new Map());
   const kabariOwnOfferByReqRef = useRef<Map<string, ScrapOffer>>(new Map());
+  const customerPrivateRidesRef = useRef<RideBooking[]>([]);
+  const driverPrivateRidesRef = useRef<RideBooking[]>([]);
+  const customerRideDispatchRef = useRef<RideDispatchSummary[]>([]);
+  const driverEligibleDispatchRef = useRef<RideDispatchSummary[]>([]);
+  const driverConfirmedDispatchRef = useRef<RideDispatchSummary[]>([]);
+  const expiredSweepInFlightRef = useRef<Set<string>>(new Set());
+  const prevAlertNotifSigRef = useRef<string>('');
+  const prevConfirmedRideIdsRef = useRef<Set<string>>(new Set());
+  const rideBookingsRef = useRef<RideBooking[]>([]);
 
   // Modals & Panels
   const [isCartOpen, setIsCartOpen] = useState(false);
@@ -599,7 +656,14 @@ export default function App() {
     setTrackedOrder(null);
     setCart([]);
     setComplaints([]);
+    setRawPrivateRides([]);
+    setRideDispatchSummaries([]);
     setRideBookings([]);
+    customerPrivateRidesRef.current = [];
+    driverPrivateRidesRef.current = [];
+    customerRideDispatchRef.current = [];
+    driverEligibleDispatchRef.current = [];
+    driverConfirmedDispatchRef.current = [];
     setDeliveries([]);
     setServiceRequests([]);
     setScrapRequests([]);
@@ -609,6 +673,9 @@ export default function App() {
     syncedShopOrderIdsRef.current.clear();
     syncedRiderOrderIdsRef.current.clear();
     syncedRiderDeliveryIdsRef.current.clear();
+    rideAlertAudio.stopAllForPanel('customer');
+    rideAlertAudio.stopAllForPanel('driver');
+    rideAlertAudio.stopAllForPanel('admin');
     try {
       CUSTOMER_LOCAL_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
     } catch (e) {
@@ -1060,6 +1127,8 @@ export default function App() {
   };
 
   const handlePartnerLogout = async () => {
+    await deactivateNotificationTokensForUser(auth.currentUser?.uid);
+    rideAlertAudio.stopAllForPanel('driver');
     setActivePartnerAccount(null);
     setIsPartnerAccountResolved(true);
     setIsPartnerAuthModalOpen(false);
@@ -1077,6 +1146,8 @@ export default function App() {
   };
 
   const handleAdminLogout = async () => {
+    await deactivateNotificationTokensForUser(auth.currentUser?.uid);
+    rideAlertAudio.stopAllForPanel('admin');
     try {
       sessionStorage.removeItem('tb_admin_manual_switch');
       sessionStorage.removeItem('tb_admin_login_pending');
@@ -1400,8 +1471,20 @@ export default function App() {
           setPublicScrapListings(snap.docs.map((d) => ({ id: d.id, ...d.data() } as PublicScrapListing)));
         }, (err) => console.warn('Admin publicScrapListings listener:', err.message)),
         onSnapshot(collection(db, 'rideBookings'), (snap) => {
-          setRideBookings(snap.docs.map((d) => ({ id: d.id, ...d.data() } as RideBooking)));
+          setRawPrivateRides(snap.docs.map((d) => ({ id: d.id, ...d.data() } as RideBooking)));
         }, (err) => console.warn('Admin rideBookings listener:', err.message)),
+        onSnapshot(collection(db, 'rideDispatch'), (snap) => {
+          setRideDispatchSummaries(snap.docs.map((d) => ({ id: d.id, ...d.data() } as RideDispatchSummary)));
+        }, (err) => console.warn('Admin rideDispatch listener:', err.message)),
+        onSnapshot(collection(db, 'notificationTokens'), (snap) => {
+          setNotificationTokens(snap.docs.map((d) => ({ id: d.id, ...d.data() } as NotificationTokenRecord)));
+        }, (err) => console.warn('Admin notificationTokens listener:', err.message)),
+        onSnapshot(collection(db, 'rideNotificationLogs'), (snap) => {
+          const list = snap.docs
+            .map((d) => ({ id: d.id, ...d.data() } as RideNotificationLog))
+            .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+          setRideNotificationLogs(list);
+        }, (err) => console.warn('Admin rideNotificationLogs listener:', err.message)),
         onSnapshot(collection(db, 'deliveries'), (snap) => {
           setDeliveries(snap.docs.map((d) => ({ id: d.id, ...d.data() } as DeliveryRequest)));
         }, (err) => console.warn('Admin deliveries listener:', err.message)),
@@ -1428,6 +1511,19 @@ export default function App() {
         setServiceRequests(Array.from(map.values()));
       };
 
+      const combineNonAdminRides = () => {
+        const pMap = new Map<string, RideBooking>();
+        customerPrivateRidesRef.current.forEach((r) => pMap.set(r.id, r));
+        driverPrivateRidesRef.current.forEach((r) => pMap.set(r.id, r));
+        setRawPrivateRides(Array.from(pMap.values()));
+
+        const dMap = new Map<string, RideDispatchSummary>();
+        customerRideDispatchRef.current.forEach((d) => dMap.set(d.id, d));
+        driverEligibleDispatchRef.current.forEach((d) => dMap.set(d.id, d));
+        driverConfirmedDispatchRef.current.forEach((d) => dMap.set(d.id, d));
+        setRideDispatchSummaries(Array.from(dMap.values()));
+      };
+
       unsubs.push(
         onSnapshot(
           query(collection(db, 'complaints'), where('userId', '==', uid)),
@@ -1448,9 +1544,18 @@ export default function App() {
         onSnapshot(
           query(collection(db, 'rideBookings'), where('customerId', '==', uid)),
           (snap) => {
-            setRideBookings(snap.docs.map((d) => ({ id: d.id, ...d.data() } as RideBooking)));
+            customerPrivateRidesRef.current = snap.docs.map((d) => ({ id: d.id, ...d.data() } as RideBooking));
+            combineNonAdminRides();
           },
           (err) => console.warn('Customer rides listener:', err.message)
+        ),
+        onSnapshot(
+          query(collection(db, 'rideDispatch'), where('customerId', '==', uid)),
+          (snap) => {
+            customerRideDispatchRef.current = snap.docs.map((d) => ({ id: d.id, ...d.data() } as RideDispatchSummary));
+            combineNonAdminRides();
+          },
+          (err) => console.warn('Customer rideDispatch listener:', err.message)
         ),
         onSnapshot(
           query(collection(db, 'deliveries'), where('customerId', '==', uid)),
@@ -1808,6 +1913,358 @@ export default function App() {
     jobListings
   ]);
 
+  // Scoped Ride Dispatch & Private Unlocked Ride Listeners for Active Approved Drivers
+  useEffect(() => {
+    const uid = firebaseUser?.uid;
+    if (
+      !uid ||
+      isAdminAuthenticated ||
+      activePartnerAccount?.status !== 'active' ||
+      activePartnerAccount.role !== 'driver' ||
+      !activePartnerAccount.linkedEntityId ||
+      currentDriver.id !== activePartnerAccount.linkedEntityId ||
+      currentDriver.ownerId !== uid ||
+      currentDriver.status !== 'approved'
+    ) {
+      driverEligibleDispatchRef.current = [];
+      driverConfirmedDispatchRef.current = [];
+      driverPrivateRidesRef.current = [];
+      return;
+    }
+
+    const linkedDriverId = activePartnerAccount.linkedEntityId;
+    const vType = currentDriver.vehicleType;
+    const syncDriverMergedState = () => {
+      const pMap = new Map<string, RideBooking>();
+      customerPrivateRidesRef.current.forEach((r) => pMap.set(r.id, r));
+      driverPrivateRidesRef.current.forEach((r) => pMap.set(r.id, r));
+      setRawPrivateRides(Array.from(pMap.values()));
+
+      const dMap = new Map<string, RideDispatchSummary>();
+      customerRideDispatchRef.current.forEach((d) => dMap.set(d.id, d));
+      driverEligibleDispatchRef.current.forEach((d) => dMap.set(d.id, d));
+      driverConfirmedDispatchRef.current.forEach((d) => dMap.set(d.id, d));
+      setRideDispatchSummaries(Array.from(dMap.values()));
+    };
+
+    const unsubs = [
+      onSnapshot(
+        query(
+          collection(db, 'rideDispatch'),
+          where('vehicleType', '==', vType),
+          where('eligibleDriverIds', 'array-contains', linkedDriverId)
+        ),
+        (snap) => {
+          driverEligibleDispatchRef.current = snap.docs.map(
+            (d) => ({ id: d.id, ...d.data() } as RideDispatchSummary)
+          );
+          syncDriverMergedState();
+        },
+        (err) => console.warn('Driver eligible rideDispatch listener:', err.message)
+      ),
+      onSnapshot(
+        query(
+          collection(db, 'rideDispatch'),
+          where('vehicleType', '==', vType),
+          where('confirmedDriverId', '==', linkedDriverId)
+        ),
+        (snap) => {
+          driverConfirmedDispatchRef.current = snap.docs.map(
+            (d) => ({ id: d.id, ...d.data() } as RideDispatchSummary)
+          );
+          syncDriverMergedState();
+        },
+        (err) => console.warn('Driver confirmed rideDispatch listener:', err.message)
+      ),
+      onSnapshot(
+        query(collection(db, 'rideBookings'), where('driverId', '==', linkedDriverId)),
+        (snap) => {
+          driverPrivateRidesRef.current = snap.docs.map(
+            (d) => ({ id: d.id, ...d.data() } as RideBooking)
+          );
+          syncDriverMergedState();
+        },
+        (err) => console.warn('Driver confirmed rideBookings listener:', err.message)
+      )
+    ];
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [
+    firebaseUser?.uid,
+    isAdminAuthenticated,
+    activePartnerAccount?.status,
+    activePartnerAccount?.role,
+    activePartnerAccount?.linkedEntityId,
+    currentDriver.id,
+    currentDriver.ownerId,
+    currentDriver.status,
+    currentDriver.vehicleType
+  ]);
+
+  // Combine non-PII /rideDispatch summaries with private /rideBookings into unified UI state
+  useEffect(() => {
+    const bookingMap = new Map(rawPrivateRides.map((b) => [b.id, b]));
+    const dispatchMap = new Map(rideDispatchSummaries.map((d) => [d.id, d]));
+    const allIds = new Set([...bookingMap.keys(), ...dispatchMap.keys()]);
+    const merged: RideBooking[] = [];
+    allIds.forEach((id) => {
+      const booking = bookingMap.get(id) || null;
+      const dispatch = dispatchMap.get(id);
+      if (dispatch) {
+        merged.push(mergeRideDispatchWithBooking(dispatch, booking));
+      } else if (booking) {
+        merged.push(booking);
+      }
+    });
+    merged.sort((a, b) => (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || ''));
+    rideBookingsRef.current = merged;
+    setRideBookings(merged);
+  }, [rawPrivateRides, rideDispatchSummaries]);
+
+  // Initialize audio gesture unlock, online/offline status, deep links, SW messages, and foreground FCM
+  useEffect(() => {
+    const detachGesture = rideAlertAudio.attachGestureUnlock();
+    const unsubAudio = rideAlertAudio.subscribe(() => setAudioStateVersion((v) => v + 1));
+
+    const onOnline = () => setIsOnlineNetwork(true);
+    const onOffline = () => setIsOnlineNetwork(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+
+    const applyDeepLink = (portal?: string, rideId?: string) => {
+      if (rideId) setFocusedRideId(rideId);
+      if (portal === 'admin') {
+        setPortalMode('admin');
+      } else if (portal === 'driver') {
+        setPortalMode('driver');
+      } else if (portal === 'customer' && rideId) {
+        setPortalMode('customer');
+        setActiveServiceView((prev) => prev || 'toto');
+      }
+    };
+
+    const initialLink = parseRideDeepLinkFromUrl();
+    if (initialLink.portal || initialLink.rideId) {
+      applyDeepLink(initialLink.portal, initialLink.rideId);
+    }
+
+    const onCustomNavigate = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ portal?: string; rideId?: string }>).detail;
+      if (detail) applyDeepLink(detail.portal, detail.rideId);
+    };
+    window.addEventListener('torsha-ride-navigate', onCustomNavigate);
+
+    const onSwMessage = (ev: MessageEvent) => {
+      if (ev.data && ev.data.type === 'TORSHA_NAVIGATE_RIDE') {
+        applyDeepLink(ev.data.portal, ev.data.rideId);
+      }
+    };
+    navigator.serviceWorker?.addEventListener('message', onSwMessage);
+
+    const detachFcm = attachForegroundFcmListener((payload) => {
+      const rideId = payload.data?.rideId;
+      const portal = (payload.data?.portal as 'driver' | 'admin' | 'customer') || 'driver';
+      if (rideId) {
+        setFocusedRideId(rideId);
+      }
+      rideAlertAudio.playUrgentChime(true);
+      const matchedRide = rideBookingsRef.current.find((r) => r.id === rideId);
+      const alertRide: RideBooking | null = matchedRide || (rideId ? {
+        id: rideId,
+        customerName: 'Passenger',
+        customerPhone: '',
+        vehicleType: (payload.data?.vehicleType as 'toto' | 'auto' | 'taxi') || 'toto',
+        pickupLocation: payload.data?.pickupLocality || 'Local Stand',
+        pickupLocality: payload.data?.pickupLocality || 'Satali',
+        dropLocation: payload.data?.dropLocality || 'Destination',
+        dropLocality: payload.data?.dropLocality || 'Hasimara',
+        estimatedFare: Number(payload.data?.estimatedFare || 0),
+        status: 'OFFER_SENT'
+      } : null);
+      if (alertRide) {
+        showRideSystemNotification({
+          ride: alertRide,
+          portal,
+          title: payload.title || 'TORSHA Ride Alert',
+          body: payload.body || `${alertRide.pickupLocality} → ${alertRide.dropLocality}`,
+          dedupKey: `fcm-${alertRide.id}-${Date.now()}`
+        });
+      }
+    });
+
+    return () => {
+      detachGesture();
+      unsubAudio();
+      detachFcm();
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('torsha-ride-navigate', onCustomNavigate);
+      navigator.serviceWorker?.removeEventListener('message', onSwMessage);
+    };
+  }, []);
+
+  const handleEnablePushNotifications = async () => {
+    const uid = firebaseUser?.uid;
+    if (!uid) return;
+    const res = await requestAndRegisterPushNotification({
+      uid,
+      role: portalMode,
+      entityId: portalMode === 'driver' ? currentDriver.id || undefined : undefined,
+      vehicleType: portalMode === 'driver' ? currentDriver.vehicleType : undefined,
+      locality: portalMode === 'driver' ? currentDriver.locality : currentLocation
+    });
+    setNotificationPermission(res.permission);
+  };
+
+  // Keep notification token doc (including live FCM token when VAPID key is set) synced when permission is granted
+  useEffect(() => {
+    const uid = firebaseUser?.uid;
+    if (!uid || notificationPermission !== 'granted') return;
+    requestAndRegisterPushNotification({
+      uid,
+      role: portalMode,
+      entityId: portalMode === 'driver' ? currentDriver.id || undefined : undefined,
+      vehicleType: portalMode === 'driver' ? currentDriver.vehicleType : undefined,
+      locality: portalMode === 'driver' ? currentDriver.locality : currentLocation,
+      requestPermissionIfDefault: false
+    }).catch(() => {});
+  }, [firebaseUser?.uid, portalMode, notificationPermission, currentDriver.id, currentDriver.vehicleType, currentDriver.locality, currentLocation]);
+
+  // Persistent Sound Until Confirmation + OS Notifications + Confirmation Chime
+  useEffect(() => {
+    const nowMs = Date.now();
+
+    // Detect newly confirmed rides -> close notification & chime
+    rideBookings.forEach((r) => {
+      const st = normalizeRideStatus(r.status);
+      if (st === 'CONFIRMED' && !prevConfirmedRideIdsRef.current.has(r.id)) {
+        prevConfirmedRideIdsRef.current.add(r.id);
+        closeRideSystemNotification(r.id);
+        rideAlertAudio.playOneShotConfirmationChime();
+      } else if (st === 'CANCELLED' || st === 'REJECTED' || st === 'EXPIRED' || st === 'COMPLETED') {
+        closeRideSystemNotification(r.id);
+      }
+    });
+
+    const driverCanReceiveAlerts =
+      portalMode === 'driver' &&
+      !isAdminAuthenticated &&
+      activePartnerAccount?.status === 'active' &&
+      activePartnerAccount.role === 'driver' &&
+      currentDriver.status === 'approved' &&
+      currentDriver.isOnline;
+
+    const actionableDriverRides = driverCanReceiveAlerts
+      ? getActionableRidesForDriver({
+          rides: rideBookings,
+          driver: currentDriver,
+          routingConfig,
+          partnerAccounts: combinedPartnerAccounts,
+          localities,
+          nowMs
+        })
+      : [];
+
+    const actionableAdminRides = isAdminAuthenticated
+      ? getActionableRidesForAdmin(rideBookings, nowMs)
+      : [];
+
+    const driverKeys = actionableDriverRides.map(
+      (r) => `${r.id}:${normalizeRideStatus(r.status)}:${r.currentRound || 1}:${r.customerProposedFare || r.estimatedFare}`
+    );
+    const adminKeys = actionableAdminRides.map(
+      (r) => `${r.id}:${normalizeRideStatus(r.status)}:${r.currentRound || 1}:${r.customerProposedFare || r.estimatedFare}`
+    );
+
+    rideAlertAudio.syncPendingRides('driver', driverKeys, true);
+    rideAlertAudio.syncPendingRides('admin', adminKeys, false);
+
+    // Trigger deduped system notifications when actionable pending rides arrive
+    const targetList = portalMode === 'admin' && isAdminAuthenticated ? actionableAdminRides : actionableDriverRides;
+    const targetPortal: 'admin' | 'driver' = portalMode === 'admin' && isAdminAuthenticated ? 'admin' : 'driver';
+    const nextSig = getPendingAlertSignature(targetList);
+
+    if (targetList.length > 0 && nextSig !== prevAlertNotifSigRef.current) {
+      prevAlertNotifSigRef.current = nextSig;
+      if (targetList.length === 1 && !focusedRideId && (portalMode === 'driver' || portalMode === 'admin')) {
+        setFocusedRideId(targetList[0].id);
+      }
+      targetList.forEach((ride) => {
+        const fare = ride.customerProposedFare || ride.estimatedFare;
+        const dedupKey = `${targetPortal}-${ride.id}-${normalizeRideStatus(ride.status)}-r${ride.currentRound || 1}-f${fare}`;
+        showRideSystemNotification({
+          ride,
+          portal: targetPortal,
+          title: `New ${ride.vehicleType.toUpperCase()} Ride Offer • ₹${fare}`,
+          body: `${ride.pickupLocality || ride.pickupLocation} → ${ride.dropLocality || ride.dropLocation}`,
+          dedupKey
+        });
+      });
+    } else if (targetList.length === 0) {
+      prevAlertNotifSigRef.current = '';
+    }
+  }, [
+    rideBookings,
+    portalMode,
+    isAdminAuthenticated,
+    activePartnerAccount?.status,
+    activePartnerAccount?.role,
+    currentDriver,
+    routingConfig,
+    localities,
+    focusedRideId
+  ]);
+
+  // Automatic Offer Expiry Sweep every 5 seconds for pending rides past expiresAtMs
+  useEffect(() => {
+    const uid = firebaseUser?.uid;
+    if (!uid) return;
+    const sweep = async () => {
+      const nowMs = Date.now();
+      const expiredTargets = rideBookings.filter(
+        (r) =>
+          !r.driverId &&
+          isRideOfferExpired(r, nowMs) &&
+          normalizeRideStatus(r.status) !== 'EXPIRED' &&
+          !expiredSweepInFlightRef.current.has(r.id)
+      );
+      for (const ride of expiredTargets) {
+        const st = normalizeRideStatus(ride.status);
+        if (!['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CUSTOMER_ACCEPTED', 'RIDER_ACCEPTED'].includes(st)) {
+          continue;
+        }
+        expiredSweepInFlightRef.current.add(ride.id);
+        const nowIso = new Date().toISOString();
+        try {
+          const batch = writeBatch(db);
+          batch.update(doc(db, 'rideDispatch', ride.id), {
+            status: 'EXPIRED',
+            updatedAt: nowIso
+          });
+          if (isAdminAuthenticated || ride.customerId === uid) {
+            batch.update(doc(db, 'rideBookings', ride.id), {
+              status: 'EXPIRED',
+              expiredAt: nowIso,
+              updatedAt: nowIso
+            });
+          }
+          await batch.commit();
+          closeRideSystemNotification(ride.id);
+        } catch {
+          // Safe retry on next sweep if race or offline
+        } finally {
+          expiredSweepInFlightRef.current.delete(ride.id);
+        }
+      }
+    };
+    const timer = window.setInterval(() => {
+      sweep().catch(() => {});
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [rideBookings, firebaseUser?.uid, isAdminAuthenticated]);
+
   // --- LOCALITY HANDLERS ---
   const handleAddLocality = (newLoc: LocalityInfo) => {
     if (!isAdminAuthenticated) return;
@@ -1886,6 +2343,7 @@ export default function App() {
 
     const enrichedReq: ScrapRequest = {
       ...restReq,
+      offers: [],
       status: 'open',
       customerId: authUid
     };
@@ -3231,7 +3689,41 @@ export default function App() {
     return { ok: true };
   };
 
-  // BACKEND REQUIRED: Atomic multi-driver claiming requires Cloud Functions; assigned driver post-confirmation updates persist to Firestore.
+  const handleExpireRide = async (rideId: string): Promise<{ ok: boolean; error?: string }> => {
+    const ride = rideBookings.find((r) => r.id === rideId);
+    if (!ride) return { ok: false, error: 'Ride booking not found.' };
+    if (ride.driverId) return { ok: false, error: 'Confirmed ride cannot be expired.' };
+    if (!isRideOfferExpired(ride) && !isAdminAuthenticated) {
+      return { ok: false, error: 'Offer window has not expired yet.' };
+    }
+    const nowIso = new Date().toISOString();
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'rideDispatch', rideId), {
+        status: 'EXPIRED',
+        updatedAt: nowIso
+      });
+      if (isAdminAuthenticated || ride.customerId === firebaseUser?.uid) {
+        batch.update(doc(db, 'rideBookings', rideId), {
+          status: 'EXPIRED',
+          expiredAt: nowIso,
+          updatedAt: nowIso
+        });
+      }
+      await batch.commit();
+      closeRideSystemNotification(rideId);
+      setRideDispatchSummaries((prev) =>
+        prev.map((d) => (d.id === rideId ? { ...d, status: 'EXPIRED', updatedAt: nowIso } : d))
+      );
+      setRawPrivateRides((prev) =>
+        prev.map((r) => (r.id === rideId ? { ...r, status: 'EXPIRED', expiredAt: nowIso, updatedAt: nowIso } : r))
+      );
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Unable to expire ride.' };
+    }
+  };
+
   const handleUpdateRideStatus = async (
     rideId: string,
     status: RideStatus
@@ -3240,320 +3732,308 @@ export default function App() {
       return { ok: false, error: 'Blocked ride status update by suspended or unapproved driver.' };
     }
     const target = rideBookings.find((r) => r.id === rideId);
-    if (!isAdminAuthenticated && (!target?.driverId || target.driverId !== currentDriver.id)) {
+    if (!target) return { ok: false, error: 'Ride booking not found.' };
+    if (!isAdminAuthenticated && (!target.driverId || target.driverId !== currentDriver.id)) {
       return {
         ok: false,
         error: 'Only the assigned driver or Super Admin can update this ride status.'
       };
     }
+
+    const actor = isAdminAuthenticated ? 'admin' : 'driver';
+    const check = canTransitionRideStatus(target.status, status, actor);
+    if (!check.allowed) {
+      return { ok: false, error: check.reason || 'Invalid ride status transition.' };
+    }
+
+    if (check.to === 'CANCELLED' && !isAdminAuthenticated) {
+      return {
+        ok: false,
+        error: 'Confirmed ride cancellations must be initiated by the customer or Super Admin.'
+      };
+    }
+
     const updatedAt = new Date().toISOString();
+    const completedPatch = check.to === 'COMPLETED' ? { completedAt: updatedAt } : {};
+    const cancelPatch =
+      check.to === 'CANCELLED' ? { cancelledAt: updatedAt, cancelledBy: 'admin' as const } : {};
+
     if (auth.currentUser) {
       try {
-        await safeUpdateDoc(doc(db, 'rideBookings', rideId), { status, updatedAt });
+        const batch = writeBatch(db);
+        batch.update(
+          doc(db, 'rideBookings', rideId),
+          cleanForFirestore({ status: check.to, ...completedPatch, ...cancelPatch, updatedAt })
+        );
+        batch.update(
+          doc(db, 'rideDispatch', rideId),
+          cleanForFirestore({ status: check.to, updatedAt })
+        );
+        await batch.commit();
       } catch (err: any) {
         return { ok: false, error: err?.message || 'Unable to update ride status.' };
       }
     }
-    setRideBookings((prev) =>
-      prev.map((r) => (r.id === rideId ? { ...r, status, updatedAt } : r))
+
+    setRideDispatchSummaries((prev) =>
+      prev.map((d) => (d.id === rideId ? { ...d, status: check.to, updatedAt } : d))
+    );
+    setRawPrivateRides((prev) =>
+      prev.map((r) => (r.id === rideId ? { ...r, status: check.to, ...completedPatch, ...cancelPatch, updatedAt } : r))
     );
     return { ok: true };
   };
 
-  // BACKEND REQUIRED: Two drivers racing to accept the same ride must be arbitrated in a Cloud Function transaction.
+  // ATOMIC SINGLE-WINNER LOCK: Uses Firestore runTransaction across /rideDispatch & /rideBookings
   const handleAcceptRide = async (
     rideId: string,
     driverId: string,
     driverName: string,
     driverPhone: string,
     vehicleNumber: string,
-    agreedFare?: number
-  ): Promise<{ ok: boolean; backendRequired?: boolean; error?: string }> => {
+    _agreedFare?: number
+  ): Promise<{ ok: boolean; error?: string }> => {
     if (!canActiveDriverOperate()) {
-      return { ok: false, error: 'Driver account is suspended or unapproved.' };
+      return { ok: false, error: 'Driver account is suspended, offline, or unapproved.' };
     }
-    if (!isAdminAuthenticated) {
+
+    const driverObj: Driver =
+      isAdminAuthenticated
+        ? drivers.find((d) => d.id === driverId) || {
+            ...EMPTY_DRIVER,
+            id: driverId,
+            name: driverName,
+            phone: driverPhone,
+            vehicleNumber,
+            status: 'approved',
+            isOnline: true,
+            rating: 4.8
+          }
+        : currentDriver;
+
+    let txResult: {
+      dispatchSummary: RideDispatchSummary;
+      bookingPatch: Partial<RideBooking>;
+    };
+
+    try {
+      txResult = await runTransaction(db, async (tx) => {
+        const dispatchRef = doc(db, 'rideDispatch', rideId);
+        const bookingRef = doc(db, 'rideBookings', rideId);
+        const dispatchSnap = await tx.get(dispatchRef);
+        if (!dispatchSnap.exists()) {
+          throw new Error('Ride dispatch record no longer exists.');
+        }
+        const dispatchData = { id: dispatchSnap.id, ...dispatchSnap.data() } as RideDispatchSummary;
+        const prepared = prepareDriverAcceptTransaction({
+          dispatch: dispatchData,
+          driver: driverObj
+        });
+        const nextBookingPatch = prepared.bookingPatch;
+        const nextDispatchSummary = { ...dispatchData, ...prepared.dispatchPatch };
+
+        tx.update(dispatchRef, cleanForFirestore(prepared.dispatchPatch));
+        tx.update(bookingRef, cleanForFirestore(prepared.bookingPatch));
+        return { dispatchSummary: nextDispatchSummary, bookingPatch: nextBookingPatch };
+      });
+    } catch (err: any) {
       return {
         ok: false,
-        backendRequired: true,
-        error: 'BACKEND REQUIRED: Concurrent driver ride claiming requires a Cloud Function transaction (Spark plan cannot prevent multi-driver race conditions).'
+        error: err?.message || 'Another rider already accepted this trip or the offer expired.'
       };
     }
 
-    const existing = rideBookings.find((r) => r.id === rideId);
-    if (!existing) return { ok: false, error: 'Ride booking not found.' };
-    if (existing.status === 'CONFIRMED' || existing.status === 'accepted') {
-      return { ok: false, error: 'Ride is already confirmed.' };
-    }
-    const updatedAt = new Date().toISOString();
-    const finalFare = agreedFare !== undefined ? agreedFare : (existing.customerProposedFare || existing.estimatedFare);
-    const acceptedOffer: FareOffer = {
-      id: `offer-${Date.now()}-dacc`,
-      offeredBy: 'driver',
-      amount: finalFare,
-      driverId,
-      driverName,
-      driverPhone,
-      status: 'accepted',
-      timestamp: updatedAt,
-      roundNumber: (existing.currentRound || 1) + 1
-    };
-    const nextHistory = [...(existing.negotiationHistory || []), acceptedOffer];
-
-    try {
-      await safeUpdateDoc(
-        doc(db, 'rideBookings', rideId),
-        cleanForFirestore({
-          status: 'CONFIRMED',
-          driverId,
-          driverName,
-          driverPhone,
-          vehicleNumber,
-          agreedFare: finalFare,
-          activeDriverOffers: [],
-          negotiationHistory: nextHistory,
-          updatedAt
-        })
-      );
-    } catch (err: any) {
-      return { ok: false, error: err?.message || 'Unable to confirm ride.' };
-    }
-
-    setRideBookings((prev) =>
-      prev.map((r) =>
-        r.id === rideId
-          ? {
-              ...r,
-              status: 'CONFIRMED',
-              driverId,
-              driverName,
-              driverPhone,
-              vehicleNumber,
-              agreedFare: finalFare,
-              activeDriverOffers: [],
-              negotiationHistory: nextHistory,
-              updatedAt
-            }
-          : r
-      )
+    const { dispatchSummary: nextDispatchSummary, bookingPatch: nextBookingPatch } = txResult;
+    closeRideSystemNotification(rideId);
+    rideAlertAudio.playOneShotConfirmationChime();
+    setRideDispatchSummaries((prev) => mergeById(prev, [nextDispatchSummary]));
+    setRawPrivateRides((prev) =>
+      prev.map((r) => (r.id === rideId ? { ...r, ...nextBookingPatch } : r))
     );
+
+    recordRideNotificationLog({
+      rideId,
+      eventType: 'CONFIRMED',
+      recipientRole: 'customer',
+      recipientId: nextDispatchSummary.customerId || rideId,
+      locality: nextDispatchSummary.pickupLocality || driverObj.locality || 'Satali',
+      vehicleType: nextDispatchSummary.vehicleType || driverObj.vehicleType,
+      channel: notificationPermission === 'granted' ? 'pwa_local' : 'in_app',
+      deliveryStatus: 'dispatched',
+      dedupKey: `confirmed-${rideId}-${driverObj.id}`,
+      timestamp: new Date().toISOString()
+    });
+
     return { ok: true };
   };
 
-  // BACKEND REQUIRED: Unassigned driver counter-offers across competing drivers require Cloud Functions.
+  // Atomic driver counter-offer persisted to /rideDispatch/{rideId} via runTransaction
   const handleDriverCounterOffer = async (
     rideId: string,
     driverObj: Driver,
     counterAmount: number,
     note?: string
-  ): Promise<{ ok: boolean; backendRequired?: boolean; error?: string }> => {
+  ): Promise<{ ok: boolean; error?: string }> => {
     if (!canActiveDriverOperate()) {
       return { ok: false, error: 'Driver account is suspended or unapproved.' };
     }
-    if (!isAdminAuthenticated) {
-      return {
-        ok: false,
-        backendRequired: true,
-        error: 'BACKEND REQUIRED: Driver counter-offer submission on unassigned ride requests requires Cloud Functions on Blaze plan.'
-      };
-    }
 
-    const existing = rideBookings.find((r) => r.id === rideId);
-    if (!existing) return { ok: false, error: 'Ride booking not found.' };
-    if (existing.status === 'CONFIRMED' || existing.status === 'COMPLETED' || existing.status === 'CANCELLED') {
-      return { ok: false, error: 'Negotiation is closed for this ride.' };
-    }
-    const updatedAt = new Date().toISOString();
-    const nextRound = (existing.currentRound || 1) + 1;
-    const newOffer: FareOffer = {
-      id: `offer-${Date.now()}-${driverObj.id}`,
-      offeredBy: 'driver',
-      amount: counterAmount,
-      driverId: driverObj.id,
-      driverName: driverObj.name,
-      driverPhone: driverObj.phone,
-      driverRating: driverObj.rating,
-      driverVehicle: driverObj.vehicleType,
-      driverPlate: driverObj.vehicleNumber,
-      note,
-      status: 'pending',
-      timestamp: updatedAt,
-      roundNumber: nextRound,
-      expiresAt: new Date(Date.now() + 120000).toISOString()
-    };
-    const updatedHistory = [...(existing.negotiationHistory || []), newOffer];
-
+    let updatedDispatch: RideDispatchSummary;
     try {
-      await safeUpdateDoc(
-        doc(db, 'rideBookings', rideId),
-        cleanForFirestore({
-          status: 'COUNTER_OFFERED',
-          activeDriverOffers: [newOffer],
-          negotiationHistory: updatedHistory,
-          currentRound: nextRound,
-          updatedAt
-        })
-      );
+      updatedDispatch = await runTransaction(db, async (tx) => {
+        const dispatchRef = doc(db, 'rideDispatch', rideId);
+        const snap = await tx.get(dispatchRef);
+        if (!snap.exists()) {
+          throw new Error('Ride dispatch record not found.');
+        }
+        const dispatchData = { id: snap.id, ...snap.data() } as RideDispatchSummary;
+        const patch = prepareDriverCounterOfferPatch({
+          dispatch: dispatchData,
+          driver: driverObj,
+          counterAmount,
+          note
+        });
+        tx.update(dispatchRef, cleanForFirestore(patch));
+        return { ...dispatchData, ...patch };
+      });
     } catch (err: any) {
-      return { ok: false, error: err?.message || 'Unable to send counter offer.' };
+      return { ok: false, error: err?.message || 'Unable to submit counter offer.' };
     }
 
-    setRideBookings((prev) =>
-      prev.map((r) =>
-        r.id === rideId
-          ? {
-              ...r,
-              status: 'COUNTER_OFFERED',
-              activeDriverOffers: [newOffer],
-              negotiationHistory: updatedHistory,
-              currentRound: nextRound,
-              updatedAt
-            }
-          : r
-      )
-    );
+    setRideDispatchSummaries((prev) => mergeById(prev, [updatedDispatch]));
+    recordRideNotificationLog({
+      rideId,
+      eventType: 'COUNTER_OFFERED',
+      recipientRole: 'customer',
+      recipientId: updatedDispatch.customerId || rideId,
+      locality: updatedDispatch.pickupLocality || driverObj.locality || 'Satali',
+      vehicleType: updatedDispatch.vehicleType || driverObj.vehicleType,
+      channel: notificationPermission === 'granted' ? 'pwa_local' : 'in_app',
+      deliveryStatus: 'dispatched',
+      dedupKey: `counter-${rideId}-${driverObj.id}-r${updatedDispatch.currentRound || 2}`,
+      timestamp: new Date().toISOString()
+    });
     return { ok: true };
   };
 
-  // BACKEND REQUIRED: Per-driver ride request dismissal requires Cloud Functions.
+  // Atomic per-driver dismissal recorded on /rideDispatch/{rideId}
   const handleDriverRejectRide = async (
     rideId: string,
     driverId: string
-  ): Promise<{ ok: boolean; backendRequired?: boolean; error?: string }> => {
+  ): Promise<{ ok: boolean; error?: string }> => {
     if (!canActiveDriverOperate()) {
       return { ok: false, error: 'Driver account is suspended or unapproved.' };
     }
-    if (!isAdminAuthenticated) {
-      return {
-        ok: false,
-        backendRequired: true,
-        error: 'BACKEND REQUIRED: Updating shared ride request rejection lists requires Cloud Functions on Blaze plan.'
-      };
-    }
 
-    const existing = rideBookings.find((r) => r.id === rideId);
-    if (!existing) return { ok: false, error: 'Ride booking not found.' };
-    const updatedAt = new Date().toISOString();
-    const rejectedOffer: FareOffer = {
-      id: `reject-${Date.now()}-${driverId}`,
-      offeredBy: 'driver',
-      amount: existing.customerProposedFare || existing.estimatedFare,
-      driverId,
-      status: 'rejected',
-      timestamp: updatedAt,
-      roundNumber: existing.currentRound || 1
-    };
-    const nextOffers = (existing.activeDriverOffers || []).filter((o) => o.driverId !== driverId);
-    const nextHistory = [...(existing.negotiationHistory || []), rejectedOffer];
-
+    let updatedDispatch: RideDispatchSummary | null = null;
     try {
-      await safeUpdateDoc(
-        doc(db, 'rideBookings', rideId),
-        cleanForFirestore({
+      await runTransaction(db, async (tx) => {
+        const dispatchRef = doc(db, 'rideDispatch', rideId);
+        const snap = await tx.get(dispatchRef);
+        if (!snap.exists()) throw new Error('Ride dispatch record not found.');
+        const dispatchData = { id: snap.id, ...snap.data() } as RideDispatchSummary;
+        if (dispatchData.confirmedDriverId) {
+          throw new Error('Ride is already confirmed with a driver.');
+        }
+        const nowIso = new Date().toISOString();
+        const rejectedIds = Array.from(new Set([...(dispatchData.rejectedDriverIds || []), driverId]));
+        const eligibleIds = dispatchData.eligibleDriverIds || [];
+        const allDeclined =
+          eligibleIds.length > 0 && eligibleIds.every((id) => rejectedIds.includes(id));
+        const nextStatus: RideStatus = allDeclined ? 'REJECTED' : dispatchData.status;
+        const rejectedOffer: FareOffer = {
+          id: `reject-${Date.now()}-${driverId}`,
+          offeredBy: 'driver',
+          amount: dispatchData.customerProposedFare || dispatchData.estimatedFare,
+          driverId,
+          action: 'REJECTED',
+          status: 'rejected',
+          timestamp: nowIso,
+          roundNumber: dispatchData.currentRound || 1
+        };
+        const nextOffers = (dispatchData.activeDriverOffers || []).filter((o) => o.driverId !== driverId);
+        const nextHistory = [...(dispatchData.negotiationHistory || []), rejectedOffer].map(
+          ({ driverPhone: _dp, ...rest }) => rest
+        );
+        const patch = {
+          rejectedDriverIds: rejectedIds,
           activeDriverOffers: nextOffers,
           negotiationHistory: nextHistory,
-          updatedAt
-        })
-      );
+          status: nextStatus,
+          updatedAt: nowIso
+        };
+        updatedDispatch = { ...dispatchData, ...patch };
+        tx.update(dispatchRef, cleanForFirestore(patch));
+      });
     } catch (err: any) {
       return { ok: false, error: err?.message || 'Unable to dismiss ride request.' };
     }
 
-    setRideBookings((prev) =>
-      prev.map((r) =>
-        r.id === rideId
-          ? {
-              ...r,
-              activeDriverOffers: nextOffers,
-              negotiationHistory: nextHistory,
-              updatedAt
-            }
-          : r
-      )
-    );
+    closeRideSystemNotification(rideId);
+    if (updatedDispatch) {
+      setRideDispatchSummaries((prev) => mergeById(prev, [updatedDispatch!]));
+    }
     return { ok: true };
   };
 
-  // BACKEND REQUIRED: Settling negotiated fare + assigning driverId into CONFIRMED state must run via trusted backend.
+  // Atomic Customer acceptance of a specific rider's counter-offer across /rideDispatch & /rideBookings
   const handleCustomerAcceptRiderOffer = async (
     bookingId: string,
     offerId: string
-  ): Promise<{ ok: boolean; backendRequired?: boolean; error?: string }> => {
-    if (!isAdminAuthenticated) {
-      return {
-        ok: false,
-        backendRequired: true,
-        error: 'BACKEND REQUIRED: Accepting a driver counter-offer and locking driver assignment requires Cloud Functions on Blaze plan.'
-      };
-    }
-
-    const existing = rideBookings.find((r) => r.id === bookingId);
-    if (!existing) return { ok: false, error: 'Ride booking not found.' };
-    const matchedOffer =
-      (existing.activeDriverOffers || []).find((o) => o.id === offerId) ||
-      (existing.negotiationHistory || []).find((o) => o.id === offerId);
-    if (!matchedOffer) return { ok: false, error: 'Matched driver offer not found.' };
-
-    const updatedAt = new Date().toISOString();
-    const finalAgreedFare = matchedOffer.amount;
-    const driverId = matchedOffer.driverId || '';
-    const driverObj = drivers.find((d) => d.id === driverId);
-    const acceptedRecord: FareOffer = {
-      id: `offer-${Date.now()}-cacc`,
-      offeredBy: 'customer',
-      amount: finalAgreedFare,
-      status: 'accepted',
-      timestamp: updatedAt,
-      roundNumber: (existing.currentRound || 1) + 1
+  ): Promise<{ ok: boolean; error?: string }> => {
+    let acceptTxResult: {
+      dispatch: RideDispatchSummary;
+      booking: RideBooking;
     };
-    const nextHistory = [
-      ...(existing.negotiationHistory || []).map((h) => (h.id === offerId ? { ...h, status: 'accepted' as const } : h)),
-      acceptedRecord
-    ];
-    const driverName = matchedOffer.driverName || driverObj?.name || 'Local Verified Partner';
-    const driverPhone = matchedOffer.driverPhone || driverObj?.phone || '';
-    const vehicleNumber = matchedOffer.driverPlate || driverObj?.vehicleNumber || '';
-    const driverRating = matchedOffer.driverRating || driverObj?.rating || 4.9;
-
     try {
-      await safeUpdateDoc(
-        doc(db, 'rideBookings', bookingId),
-        cleanForFirestore({
-          status: 'CONFIRMED',
-          agreedFare: finalAgreedFare,
-          ...(driverId ? { driverId } : {}),
-          driverName,
-          ...(driverPhone ? { driverPhone } : {}),
-          ...(vehicleNumber ? { vehicleNumber } : {}),
-          driverRating,
-          activeDriverOffers: [],
-          negotiationHistory: nextHistory,
-          updatedAt
-        })
-      );
+      acceptTxResult = await runTransaction(db, async (tx) => {
+        const dispatchRef = doc(db, 'rideDispatch', bookingId);
+        const bookingRef = doc(db, 'rideBookings', bookingId);
+        const [dispatchSnap, bookingSnap] = await Promise.all([tx.get(dispatchRef), tx.get(bookingRef)]);
+        if (!dispatchSnap.exists() || !bookingSnap.exists()) {
+          throw new Error('Ride records are incomplete or no longer exist.');
+        }
+        const dispatchData = { id: dispatchSnap.id, ...dispatchSnap.data() } as RideDispatchSummary;
+        const bookingData = { id: bookingSnap.id, ...bookingSnap.data() } as RideBooking;
+
+        // Hydrate driver public card phone fallback only if admin; customer accepts without leaking driver phone pre-confirm
+        const prepared = prepareCustomerAcceptOfferTransaction({
+          ride: bookingData,
+          dispatch: dispatchData,
+          offerId
+        });
+
+        tx.update(dispatchRef, cleanForFirestore(prepared.dispatchPatch));
+        tx.update(bookingRef, cleanForFirestore(prepared.bookingPatch));
+        return {
+          dispatch: { ...dispatchData, ...prepared.dispatchPatch },
+          booking: { ...bookingData, ...prepared.bookingPatch }
+        };
+      });
     } catch (err: any) {
-      return { ok: false, error: err?.message || 'Unable to confirm ride offer.' };
+      return { ok: false, error: err?.message || 'Unable to confirm driver offer.' };
     }
 
-    setRideBookings((prev) =>
-      prev.map((r) =>
-        r.id === bookingId
-          ? {
-              ...r,
-              status: 'CONFIRMED',
-              agreedFare: finalAgreedFare,
-              ...(driverId ? { driverId } : {}),
-              driverName,
-              ...(driverPhone ? { driverPhone } : {}),
-              ...(vehicleNumber ? { vehicleNumber } : {}),
-              driverRating,
-              activeDriverOffers: [],
-              negotiationHistory: nextHistory,
-              updatedAt
-            }
-          : r
-      )
-    );
+    const { dispatch: nextDispatch, booking: nextBooking } = acceptTxResult;
+    closeRideSystemNotification(bookingId);
+    rideAlertAudio.playOneShotConfirmationChime();
+    setRideDispatchSummaries((prev) => mergeById(prev, [nextDispatch]));
+    setRawPrivateRides((prev) => mergeById(prev, [nextBooking]));
+
+    if (nextBooking.driverId) {
+      recordRideNotificationLog({
+        rideId: bookingId,
+        eventType: 'CONFIRMED',
+        recipientRole: 'driver',
+        recipientId: nextBooking.driverId,
+        locality: nextBooking.pickupLocality || nextDispatch.pickupLocality || 'Satali',
+        vehicleType: nextBooking.vehicleType,
+        channel: notificationPermission === 'granted' ? 'pwa_local' : 'in_app',
+        deliveryStatus: 'dispatched',
+        dedupKey: `cust-confirmed-${bookingId}-${nextBooking.driverId}`,
+        timestamp: new Date().toISOString()
+      });
+    }
     return { ok: true };
   };
 
@@ -3561,116 +4041,139 @@ export default function App() {
     bookingId: string,
     newAmount: number
   ): Promise<{ ok: boolean; error?: string }> => {
-    const updatedAt = new Date().toISOString();
     const current = rideBookings.find((r) => r.id === bookingId);
     if (!current) return { ok: false, error: 'Ride booking not found.' };
-    if (['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].includes(current.status)) {
-      return { ok: false, error: 'Negotiation is closed for this ride.' };
-    }
-    const nextRound = (current.currentRound || 1) + 1;
-    const counterRecord: FareOffer = {
-      id: `offer-${Date.now()}-cback`,
-      offeredBy: 'customer',
-      amount: newAmount,
-      status: 'pending',
-      timestamp: updatedAt,
-      roundNumber: nextRound
-    };
-    const nextHistory = [...(current.negotiationHistory || []), counterRecord];
+
+    let nextDispatch: RideDispatchSummary | null = null;
+    let nextBooking: RideBooking | null = null;
 
     if (auth.currentUser) {
       try {
-        await safeUpdateDoc(doc(db, 'rideBookings', bookingId), {
-          status: 'OFFER_SENT',
-          customerProposedFare: newAmount,
-          activeDriverOffers: [],
-          negotiationHistory: nextHistory,
-          currentRound: nextRound,
-          updatedAt
+        await runTransaction(db, async (tx) => {
+          const dispatchRef = doc(db, 'rideDispatch', bookingId);
+          const bookingRef = doc(db, 'rideBookings', bookingId);
+          const [dispatchSnap, bookingSnap] = await Promise.all([tx.get(dispatchRef), tx.get(bookingRef)]);
+          if (!dispatchSnap.exists() || !bookingSnap.exists()) {
+            throw new Error('Ride records not found.');
+          }
+          const dispatchData = { id: dispatchSnap.id, ...dispatchSnap.data() } as RideDispatchSummary;
+          const bookingData = { id: bookingSnap.id, ...bookingSnap.data() } as RideBooking;
+          const merged = mergeRideDispatchWithBooking(dispatchData, bookingData);
+          const prepared = prepareCustomerCounterBackPatch({
+            ride: merged,
+            counterAmount: newAmount
+          });
+          nextDispatch = { ...dispatchData, ...prepared.dispatchPatch };
+          nextBooking = { ...bookingData, ...prepared.bookingPatch };
+
+          tx.update(dispatchRef, cleanForFirestore(prepared.dispatchPatch));
+          tx.update(bookingRef, cleanForFirestore(prepared.bookingPatch));
         });
       } catch (err: any) {
-        return { ok: false, error: err?.message || 'Unable to send fare offer.' };
+        return { ok: false, error: err?.message || 'Unable to send counter fare offer.' };
       }
     }
 
-    setRideBookings((prev) =>
-      prev.map((r) =>
-        r.id === bookingId
-          ? {
-              ...r,
-              customerProposedFare: newAmount,
-              status: 'OFFER_SENT',
-              activeDriverOffers: [],
-              negotiationHistory: nextHistory,
-              currentRound: nextRound,
-              updatedAt
-            }
-          : r
-      )
-    );
+    if (nextDispatch) setRideDispatchSummaries((prev) => mergeById(prev, [nextDispatch!]));
+    if (nextBooking) setRawPrivateRides((prev) => mergeById(prev, [nextBooking!]));
     return { ok: true };
   };
 
-  // BACKEND REQUIRED: Updating offer rejection state cleanly across drivers & customer requires Cloud Functions.
   const handleCustomerRejectRiderOffer = async (
     bookingId: string,
     offerId: string
-  ): Promise<{ ok: boolean; backendRequired?: boolean; error?: string }> => {
-    if (!isAdminAuthenticated) {
-      return {
-        ok: false,
-        backendRequired: true,
-        error: 'BACKEND REQUIRED: Rejecting individual driver counter-offers requires Cloud Functions on Blaze plan.'
-      };
-    }
-
-    const existing = rideBookings.find((r) => r.id === bookingId);
-    if (!existing) return { ok: false, error: 'Ride booking not found.' };
-    const updatedAt = new Date().toISOString();
-    const nextOffers = (existing.activeDriverOffers || []).filter((o) => o.id !== offerId);
-    const nextHistory = (existing.negotiationHistory || []).map((h) =>
-      h.id === offerId ? { ...h, status: 'rejected' as const } : h
-    );
+  ): Promise<{ ok: boolean; error?: string }> => {
+    let nextDispatch: RideDispatchSummary | null = null;
+    let nextBooking: RideBooking | null = null;
     try {
-      await safeUpdateDoc(
-        doc(db, 'rideBookings', bookingId),
-        cleanForFirestore({
-          status: 'REQUESTED',
+      await runTransaction(db, async (tx) => {
+        const dispatchRef = doc(db, 'rideDispatch', bookingId);
+        const bookingRef = doc(db, 'rideBookings', bookingId);
+        const [dispatchSnap, bookingSnap] = await Promise.all([tx.get(dispatchRef), tx.get(bookingRef)]);
+        if (!dispatchSnap.exists() || !bookingSnap.exists()) {
+          throw new Error('Ride records not found.');
+        }
+        const dispatchData = { id: dispatchSnap.id, ...dispatchSnap.data() } as RideDispatchSummary;
+        const bookingData = { id: bookingSnap.id, ...bookingSnap.data() } as RideBooking;
+        if (dispatchData.confirmedDriverId || bookingData.driverId) {
+          throw new Error('Ride is already confirmed.');
+        }
+        const nowMs = Date.now();
+        const updatedAt = new Date(nowMs).toISOString();
+        const nextRound = Number(dispatchData.currentRound || bookingData.currentRound || 1);
+        const nextOffers = (dispatchData.activeDriverOffers || []).filter((o) => o.id !== offerId);
+        const nextHistory = (dispatchData.negotiationHistory || []).map((h) =>
+          h.id === offerId ? { ...h, status: 'rejected' as const } : h
+        );
+        const expMs = Math.max(dispatchData.expiresAtMs || 0, nowMs + 180000);
+        const expIso = new Date(expMs).toISOString();
+        const sharedPatch = {
+          status: 'COUNTER_OFFERED' as const,
+          customerProposedFare: Number(dispatchData.customerProposedFare || bookingData.customerProposedFare || bookingData.estimatedFare),
           activeDriverOffers: nextOffers,
           negotiationHistory: nextHistory,
+          currentRound: nextRound,
+          expiresAt: expIso,
+          expiresAtMs: expMs,
           updatedAt
-        })
-      );
+        };
+        nextDispatch = { ...dispatchData, ...sharedPatch };
+        nextBooking = { ...bookingData, ...sharedPatch };
+        tx.update(dispatchRef, cleanForFirestore(sharedPatch));
+        tx.update(bookingRef, cleanForFirestore(sharedPatch));
+      });
     } catch (err: any) {
       return { ok: false, error: err?.message || 'Unable to reject driver offer.' };
     }
 
-    setRideBookings((prev) =>
+    if (nextDispatch) setRideDispatchSummaries((prev) => mergeById(prev, [nextDispatch!]));
+    if (nextBooking) setRawPrivateRides((prev) => mergeById(prev, [nextBooking!]));
+    return { ok: true };
+  };
+
+  const handleCustomerCancelRide = async (bookingId: string): Promise<{ ok: boolean; error?: string }> => {
+    const existing = rideBookings.find((r) => r.id === bookingId);
+    if (!existing) return { ok: false, error: 'Ride booking not found.' };
+    if (normalizeRideStatus(existing.status) === 'COMPLETED') {
+      return { ok: false, error: 'Completed ride cannot be cancelled.' };
+    }
+    const updatedAt = new Date().toISOString();
+    if (auth.currentUser) {
+      try {
+        const batch = writeBatch(db);
+        batch.update(doc(db, 'rideBookings', bookingId), {
+          status: 'CANCELLED',
+          cancelledAt: updatedAt,
+          cancelledBy: isAdminAuthenticated ? 'admin' : 'customer',
+          updatedAt
+        });
+        batch.update(doc(db, 'rideDispatch', bookingId), {
+          status: 'CANCELLED',
+          updatedAt
+        });
+        await batch.commit();
+      } catch (err: any) {
+        return { ok: false, error: err?.message || 'Unable to cancel ride.' };
+      }
+    }
+    closeRideSystemNotification(bookingId);
+    setRideDispatchSummaries((prev) =>
+      prev.map((d) => (d.id === bookingId ? { ...d, status: 'CANCELLED', updatedAt } : d))
+    );
+    setRawPrivateRides((prev) =>
       prev.map((r) =>
         r.id === bookingId
           ? {
               ...r,
-              status: 'REQUESTED',
-              activeDriverOffers: nextOffers,
-              negotiationHistory: nextHistory,
+              status: 'CANCELLED',
+              cancelledAt: updatedAt,
+              cancelledBy: isAdminAuthenticated ? 'admin' : 'customer',
               updatedAt
             }
           : r
       )
     );
     return { ok: true };
-  };
-
-  const handleCustomerCancelRide = (bookingId: string) => {
-    const updatedAt = new Date().toISOString();
-    setRideBookings((prev) =>
-      prev.map((r) => (r.id === bookingId ? { ...r, status: 'CANCELLED', updatedAt } : r))
-    );
-    if (auth.currentUser) {
-      safeUpdateDoc(doc(db, 'rideBookings', bookingId), { status: 'CANCELLED', updatedAt }).catch((err) =>
-        console.warn('Firestore ride cancel notice:', err.message)
-      );
-    }
   };
 
   const handleCustomerBookRide = async (booking: RideBooking): Promise<{ ok: boolean; error?: string }> => {
@@ -3680,45 +4183,53 @@ export default function App() {
     }
     const pickupLoc = booking.pickupLocality || resolveAreaKey(booking.pickupLocation, localities);
     const dropLoc = booking.dropLocality || resolveAreaKey(booking.dropLocation, localities);
-    const eligible =
+
+    const effectivePublicDrivers: PublicDriverCard[] =
       drivers.length > 0
-        ? getEligiblePartnersForRequest({
+        ? drivers.map((d) => toPublicDriverCard(d, 'active'))
+        : approvedDrivers;
+
+    let bundle;
+    try {
+      bundle = buildNewRideRequestBundle({
+        rideId: booking.id,
+        customerId: authUid,
+        customerName: booking.customerName,
+        customerPhone: booking.customerPhone,
+        vehicleType: booking.vehicleType,
+        pickupLocation: booking.pickupLocation,
+        pickupLocality: pickupLoc,
+        pickupLandmark: booking.pickupLandmark,
+        dropLocation: booking.dropLocation,
+        dropLocality: dropLoc,
+        dropLandmark: booking.dropLandmark,
+        distanceKm: Number(booking.distanceKm || 0),
+        suggestedFare: booking.suggestedFare || booking.estimatedFare,
+        customerProposedFare: booking.customerProposedFare || booking.estimatedFare,
+        publicDrivers: effectivePublicDrivers,
+        routingConfig,
+        partnerAccounts: combinedPartnerAccounts,
+        localities,
+        existingRides: rideBookings
+      });
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Unable to validate ride request.' };
+    }
+
+    const alert =
+      bundle.eligibleDriverIds.length === 0
+        ? buildUnavailableLocalityAlert({
+            requestId: bundle.booking.id,
             serviceCategory: 'ride',
             requestLocality: pickupLoc,
-            requestedVehicleType: booking.vehicleType,
-            config: routingConfig,
-            drivers,
-            partnerAccounts: combinedPartnerAccounts,
-            localities
-          }).eligible
-        : evaluatePublicDriverCardsForRide({
-            pickupLocality: pickupLoc,
-            requestedVehicleType: booking.vehicleType,
-            config: routingConfig,
-            approvedDrivers,
-            partnerAccounts: combinedPartnerAccounts,
-            localities
-          }).eligible;
-
-    const enrichedBooking: RideBooking = {
-      ...booking,
-      pickupLocality: pickupLoc,
-      dropLocality: dropLoc,
-      routingStatus: eligible.length === 0 ? 'unavailable_in_locality' : 'pending_admin_routing',
-      customerId: authUid
-    };
-    const alert = eligible.length === 0
-      ? buildUnavailableLocalityAlert({
-          requestId: enrichedBooking.id,
-          serviceCategory: 'ride',
-          requestLocality: pickupLoc,
-          vehicleType: booking.vehicleType
-        })
-      : null;
+            vehicleType: booking.vehicleType
+          })
+        : null;
 
     try {
       const batch = writeBatch(db);
-      batch.set(doc(db, 'rideBookings', enrichedBooking.id), cleanForFirestore(enrichedBooking));
+      batch.set(doc(db, 'rideBookings', bundle.booking.id), cleanForFirestore(bundle.booking));
+      batch.set(doc(db, 'rideDispatch', bundle.dispatch.id), cleanForFirestore(bundle.dispatch));
       if (alert) {
         batch.set(doc(db, 'routingAlerts', alert.id), cleanForFirestore(alert));
       }
@@ -3730,7 +4241,38 @@ export default function App() {
     if (alert) {
       setRoutingAlerts((prev) => [alert, ...prev]);
     }
-    setRideBookings((prev) => [enrichedBooking, ...prev]);
+    setRawPrivateRides((prev) => [bundle.booking, ...prev]);
+    setRideDispatchSummaries((prev) => [bundle.dispatch, ...prev]);
+
+    // Log dispatch notifications for Admin + all eligible approved local riders simultaneously
+    const nowIso = new Date().toISOString();
+    recordRideNotificationLog({
+      rideId: bundle.booking.id,
+      eventType: 'RIDE_REQUESTED',
+      recipientRole: 'admin',
+      recipientId: 'super_admin',
+      locality: pickupLoc,
+      vehicleType: booking.vehicleType,
+      channel: 'in_app',
+      deliveryStatus: 'dispatched',
+      dedupKey: `new-ride-${bundle.booking.id}-admin`,
+      timestamp: nowIso
+    });
+    bundle.eligibleDriverIds.forEach((driverId) => {
+      recordRideNotificationLog({
+        rideId: bundle.booking.id,
+        eventType: 'RIDE_REQUESTED',
+        recipientRole: 'driver',
+        recipientId: driverId,
+        locality: pickupLoc,
+        vehicleType: booking.vehicleType,
+        channel: isFcmVapidConfigured() ? 'fcm' : 'pwa_local',
+        deliveryStatus: 'dispatched',
+        dedupKey: `new-ride-${bundle.booking.id}-${driverId}`,
+        timestamp: nowIso
+      });
+    });
+
     return { ok: true };
   };
 
@@ -5474,8 +6016,10 @@ export default function App() {
       if (!validation.allowed || !driver) {
         return { allowed: false, error: validation.errorMessage || 'Selected driver is ineligible.' };
       }
+      const lockedAgreedFare = ride.agreedFare || ride.customerProposedFare || ride.estimatedFare;
+      assertAgreedFareImmutable(ride, lockedAgreedFare);
       const nextHistory = [...(ride.assignmentHistory || []), validation.auditEntry];
-      setRideBookings((prev) =>
+      setRawPrivateRides((prev) =>
         prev.map((r) =>
           r.id === ride.id
             ? {
@@ -5485,13 +6029,36 @@ export default function App() {
                 driverName: driver.name,
                 driverPhone: driver.phone,
                 vehicleNumber: driver.vehicleNumber,
+                driverRating: driver.rating,
                 driverLocality: driver.currentLocation || driver.locality,
-                agreedFare: r.agreedFare || r.customerProposedFare || r.estimatedFare,
+                agreedFare: lockedAgreedFare,
+                agreedAt: r.agreedAt || now,
+                confirmedAt: r.confirmedAt || now,
                 routingStatus: 'assigned',
                 assignmentHistory: nextHistory,
                 updatedAt: now
               }
             : r
+        )
+      );
+      setRideDispatchSummaries((prev) =>
+        prev.map((d) =>
+          d.id === ride.id
+            ? {
+                ...d,
+                status: 'CONFIRMED',
+                assignedDriverId: driver.id,
+                confirmedDriverId: driver.id,
+                driverName: driver.name,
+                vehicleNumber: driver.vehicleNumber,
+                driverRating: driver.rating,
+                agreedFare: lockedAgreedFare,
+                agreedAt: d.agreedAt || now,
+                confirmedAt: d.confirmedAt || now,
+                routingStatus: 'assigned',
+                updatedAt: now
+              }
+            : d
         )
       );
       setRoutingAlerts((prev) =>
@@ -5500,17 +6067,43 @@ export default function App() {
       routingAlerts
         .filter((a) => a.requestId === ride.id && a.status === 'open')
         .forEach((a) => safeUpdateDoc(doc(db, 'routingAlerts', a.id), { status: 'resolved', resolvedAt: now }).catch(() => {}));
-      safeUpdateDoc(doc(db, 'rideBookings', ride.id), {
-        status: 'CONFIRMED',
-        driverId: driver.id,
-        driverName: driver.name,
-        driverPhone: driver.phone,
-        vehicleNumber: driver.vehicleNumber,
-        driverLocality: driver.currentLocation || driver.locality,
-        routingStatus: 'assigned',
-        assignmentHistory: nextHistory,
-        updatedAt: now
-      }).catch((err) => console.warn(err));
+
+      const batch = writeBatch(db);
+      batch.update(
+        doc(db, 'rideBookings', ride.id),
+        cleanForFirestore({
+          status: 'CONFIRMED',
+          driverId: driver.id,
+          driverName: driver.name,
+          driverPhone: driver.phone,
+          vehicleNumber: driver.vehicleNumber,
+          driverRating: driver.rating,
+          driverLocality: driver.currentLocation || driver.locality,
+          agreedFare: lockedAgreedFare,
+          agreedAt: ride.agreedAt || now,
+          confirmedAt: ride.confirmedAt || now,
+          routingStatus: 'assigned',
+          assignmentHistory: nextHistory,
+          updatedAt: now
+        })
+      );
+      batch.update(
+        doc(db, 'rideDispatch', ride.id),
+        cleanForFirestore({
+          status: 'CONFIRMED',
+          assignedDriverId: driver.id,
+          confirmedDriverId: driver.id,
+          driverName: driver.name,
+          vehicleNumber: driver.vehicleNumber,
+          driverRating: driver.rating,
+          agreedFare: lockedAgreedFare,
+          agreedAt: ride.agreedAt || now,
+          confirmedAt: ride.confirmedAt || now,
+          routingStatus: 'assigned',
+          updatedAt: now
+        })
+      );
+      batch.commit().catch((err) => console.warn(err));
       logAdminAction('Locality Ride Dispatch', `Assigned ${driver.name} (${driver.vehicleType}) to ride ${ride.id}`);
       return { allowed: true };
     }
@@ -5754,6 +6347,27 @@ export default function App() {
             onAssignPartnerWithRouting={handleAssignPartnerWithRouting}
             onResolveRoutingAlert={handleResolveRoutingAlert}
             serviceRequests={serviceRequests}
+            rideDispatchSummaries={rideDispatchSummaries}
+            notificationTokens={notificationTokens}
+            rideNotificationLogs={rideNotificationLogs}
+            focusedRideId={focusedRideId}
+            onCancelRide={handleCustomerCancelRide}
+            onExpireRide={handleExpireRide}
+            alertAudioStatus={rideAlertAudio.getPanelStatus('admin')}
+            onToggleAlertMute={() =>
+              rideAlertAudio.setMuted('admin', !rideAlertAudio.getPanelStatus('admin').muted)
+            }
+            onSnoozeAlerts={(ms = 5 * 60 * 1000) => {
+              if (ms <= 0) rideAlertAudio.clearSnooze('admin');
+              else rideAlertAudio.snooze('admin', ms);
+            }}
+            onUnlockAndTestAudio={async () => {
+              const ok = await rideAlertAudio.unlockAudio();
+              rideAlertAudio.playUrgentChime(false);
+              return ok;
+            }}
+            onEnablePushNotifications={handleEnablePushNotifications}
+            notificationPermission={notificationPermission}
           />
 
           <PortalSwitcherModal
@@ -5925,6 +6539,24 @@ export default function App() {
             onAcceptRide={handleAcceptRide}
             onDriverCounterOffer={handleDriverCounterOffer}
             onDriverRejectRide={handleDriverRejectRide}
+            onExpireRide={handleExpireRide}
+            focusedRideId={focusedRideId}
+            alertAudioStatus={rideAlertAudio.getPanelStatus('driver')}
+            onToggleAlertMute={() =>
+              rideAlertAudio.setMuted('driver', !rideAlertAudio.getPanelStatus('driver').muted)
+            }
+            onSnoozeAlerts={(ms = 5 * 60 * 1000) => {
+              if (ms <= 0) rideAlertAudio.clearSnooze('driver');
+              else rideAlertAudio.snooze('driver', ms);
+            }}
+            onUnlockAndTestAudio={async () => {
+              const ok = await rideAlertAudio.unlockAudio();
+              rideAlertAudio.playUrgentChime(true);
+              return ok;
+            }}
+            onEnablePushNotifications={handleEnablePushNotifications}
+            notificationPermission={notificationPermission}
+            isOnlineNetwork={isOnlineNetwork}
             onLogout={isAdminAuthenticated ? handleAdminLogout : handlePartnerLogout}
           />
 
@@ -6360,6 +6992,11 @@ export default function App() {
                   routingConfig={routingConfig}
                   partnerAccounts={combinedPartnerAccounts}
                   localities={localities}
+                  focusedRideId={focusedRideId}
+                  onExpireRide={handleExpireRide}
+                  onRequestNotifications={handleEnablePushNotifications}
+                  notificationPermission={notificationPermission}
+                  isOnlineNetwork={isOnlineNetwork}
                 />
               )}
 
@@ -6490,6 +7127,7 @@ export default function App() {
                   onTrackOrder={handleOpenActiveTracker}
                   onOpenCart={() => setIsCartOpen(true)}
                   onLogout={async () => {
+                    await deactivateNotificationTokensForUser(auth.currentUser?.uid);
                     clearCustomerScopedState();
                     await handleAuthSignOut();
                     setUser(createGuestUserProfile(currentLocation, currentPincode, user.language || 'en'));
@@ -6593,6 +7231,7 @@ export default function App() {
           user={user}
           onLogout={async () => {
             setIsSideDrawerOpen(false);
+            await deactivateNotificationTokensForUser(auth.currentUser?.uid);
             clearCustomerScopedState();
             await handleAuthSignOut();
             setUser(createGuestUserProfile(currentLocation, currentPincode, user.language || 'en'));

@@ -482,10 +482,12 @@ export interface FareOffer {
   driverVehicle?: string;
   driverPlate?: string;
   note?: string;
+  action?: RideStatus;
   status: 'pending' | 'accepted' | 'rejected' | 'countered' | 'expired';
   timestamp: string;
   roundNumber: number;
   expiresAt?: string;
+  expiresAtMs?: number;
 }
 
 export interface RideOption {
@@ -552,6 +554,8 @@ export interface RideBooking {
   suggestedFare?: number;
   customerProposedFare?: number;
   agreedFare?: number;
+  agreedAt?: string;
+  confirmedAt?: string;
   status: RideStatus;
   driverId?: string;
   driverName?: string;
@@ -560,12 +564,25 @@ export interface RideBooking {
   vehicleNumber?: string;
   driverRating?: number;
   routingStatus?: RequestRoutingStatus;
+  eligibleDriverIds?: string[];
+  rejectedDriverIds?: string[];
   assignmentHistory?: AssignmentAuditEntry[];
   negotiationHistory?: FareOffer[];
   activeDriverOffers?: FareOffer[];
   maxNegotiationRounds?: number;
   currentRound?: number;
   expiresAt?: string;
+  expiresAtMs?: number;
+  expiredAt?: string;
+  cancelledAt?: string;
+  cancelledBy?: 'customer' | 'driver' | 'admin';
+  completedAt?: string;
+  notificationSummary?: {
+    eligibleCount: number;
+    onlineTokensCount?: number;
+    adminNotifiedAt?: string;
+    lastAlertAt?: string;
+  };
   createdAt?: string;
   updatedAt?: string;
 }
@@ -1024,14 +1041,32 @@ export interface NearbyHospital {
 export interface RideDispatchSummary {
   id: string;
   rideId: string;
+  customerId?: string;
   vehicleType: VehicleType;
   pickupLocality: string;
   dropLocality: string;
   distanceKm?: number;
   estimatedFare: number;
+  suggestedFare?: number;
   customerProposedFare?: number;
+  agreedFare?: number;
+  agreedAt?: string;
+  confirmedAt?: string;
   status: RideStatus;
+  routingStatus?: RequestRoutingStatus;
   assignedDriverId?: string;
+  confirmedDriverId?: string;
+  driverName?: string;
+  vehicleNumber?: string;
+  driverRating?: number;
+  eligibleDriverIds?: string[];
+  rejectedDriverIds?: string[];
+  activeDriverOffers?: FareOffer[];
+  negotiationHistory?: FareOffer[];
+  currentRound?: number;
+  maxNegotiationRounds?: number;
+  expiresAt?: string;
+  expiresAtMs?: number;
   createdAt: string;
   updatedAt?: string;
 }
@@ -1146,4 +1181,52 @@ export interface RoutingAlert {
   createdAt: string;
   resolvedAt?: string;
 }
+
+// ==========================================
+// SMART RIDE ALERTS & FCM NOTIFICATION TOKENS
+// ==========================================
+export type NotificationChannelMode = 'fcm' | 'pwa_local' | 'in_app';
+
+export interface NotificationTokenRecord {
+  id: string;
+  uid: string;
+  role: PortalMode;
+  entityId?: string;
+  vehicleType?: VehicleType;
+  locality?: string;
+  token: string;
+  fcmEnabled: boolean;
+  permissionStatus: 'granted' | 'denied' | 'default' | 'unsupported';
+  platform: 'android_pwa' | 'web' | 'ios_pwa';
+  channelId: string;
+  active: boolean;
+  userAgent?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RideNotificationLog {
+  id: string;
+  rideId: string;
+  recipientRole: 'driver' | 'admin' | 'customer';
+  recipientId?: string;
+  recipientLabel?: string;
+  locality: string;
+  vehicleType: VehicleType;
+  channel: NotificationChannelMode;
+  eventType:
+    | 'RIDE_REQUESTED'
+    | 'COUNTER_OFFERED'
+    | 'CONFIRMED'
+    | 'REMINDER'
+    | 'REJECTED'
+    | 'EXPIRED'
+    | 'CANCELLED'
+    | 'STATUS_CHANGED';
+  deliveryStatus: 'dispatched' | 'seen' | 'clicked' | 'muted' | 'failed';
+  dedupKey: string;
+  timestamp: string;
+  details?: string;
+}
+
 

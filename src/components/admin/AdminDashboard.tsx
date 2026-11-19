@@ -36,7 +36,12 @@ import {
   X,
   KeyRound,
   Copy,
-  EyeOff
+  EyeOff,
+  Bell,
+  BellOff,
+  BellRing,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 import { 
   Shop, 
@@ -70,13 +75,18 @@ import {
   VehicleType,
   DoctorSpecialization,
   ServiceCategoryType,
-  ShopCategoryType
+  ShopCategoryType,
+  RideDispatchSummary,
+  NotificationTokenRecord,
+  RideNotificationLog
 } from '../../types';
 import { INITIAL_SERVICE_LOCALITIES, createDefaultRoutingConfig } from '../../utils/hyperlocalRouting';
 import { resolveShopTypeFromCategory } from '../../utils/partnerLifecycle';
 import { computeCartItemLineTotal } from '../../utils/checkoutOrder';
+import { getActionableRidesForAdmin } from '../../utils/rideLifecycle';
 import { PWAInstallButton } from '../common/PWAInstallButton';
 import { LocalityRoutingTab } from './LocalityRoutingTab';
+import { AdminRidesMonitorTab } from './AdminRidesMonitorTab';
 
 interface AdminDashboardProps {
   onSwitchPortal: () => void;
@@ -137,6 +147,25 @@ interface AdminDashboardProps {
   }) => { allowed: boolean; error?: string };
   onResolveRoutingAlert?: (alertId: string) => void;
   serviceRequests?: ServiceRequest[];
+  rideDispatchSummaries?: RideDispatchSummary[];
+  notificationTokens?: NotificationTokenRecord[];
+  rideNotificationLogs?: RideNotificationLog[];
+  focusedRideId?: string | null;
+  onCancelRide?: (rideId: string) => Promise<{ ok: boolean; error?: string } | void> | void;
+  onExpireRide?: (rideId: string) => Promise<{ ok: boolean; error?: string } | void> | void;
+  alertAudioStatus?: {
+    muted: boolean;
+    snoozed: boolean;
+    snoozeRemainingSec: number;
+    activeCount: number;
+    isRinging: boolean;
+    unlocked: boolean;
+  };
+  onToggleAlertMute?: () => void;
+  onSnoozeAlerts?: (durationMs?: number) => void;
+  onUnlockAndTestAudio?: () => Promise<boolean> | void;
+  onEnablePushNotifications?: () => Promise<void> | void;
+  notificationPermission?: 'granted' | 'denied' | 'default' | 'unsupported';
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -183,10 +212,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onUpdateRoutingConfig,
   onAssignPartnerWithRouting,
   onResolveRoutingAlert,
-  serviceRequests = []
+  serviceRequests = [],
+  rideDispatchSummaries = [],
+  notificationTokens = [],
+  rideNotificationLogs = [],
+  focusedRideId,
+  onCancelRide,
+  onExpireRide,
+  alertAudioStatus,
+  onToggleAlertMute,
+  onSnoozeAlerts,
+  onUnlockAndTestAudio,
+  onEnablePushNotifications,
+  notificationPermission = 'default'
 }) => {
   const [activeTab, setActiveTab] = useState<
-    'overview' | 'routing' | 'role_accounts' | 'shops' | 'orders' | 'doctors' | 'emergency_requests' | 'customers' | 'drivers' | 'deliveries' | 'services' | 'jobs' | 'scrap' | 'localities' | 'complaints' | 'activity'
+    'overview' | 'rides' | 'routing' | 'role_accounts' | 'shops' | 'orders' | 'doctors' | 'emergency_requests' | 'customers' | 'drivers' | 'deliveries' | 'services' | 'jobs' | 'scrap' | 'localities' | 'complaints' | 'activity'
   >('overview');
 
   // Role Account Provisioning State (ephemeral password never stored in Firestore)
@@ -331,8 +372,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const pendingDoctors = doctors.filter((d) => d.status === 'pending');
   const openRoutingAlerts = routingAlerts.filter((a) => a.status === 'open');
+  const pendingActionableRides = getActionableRidesForAdmin(rideBookings);
   const activeEmergencyCalls = emergencyDoctorRequests.filter((r) => r.status === 'pending');
   const pendingReturns = orders.filter((o) => o.returnRequest?.status === 'pending_review');
+
+  React.useEffect(() => {
+    if (focusedRideId) {
+      setActiveTab('rides');
+    }
+  }, [focusedRideId]);
 
   const findLinkedAccountForEntity = (role: PartnerRoleType, entityId: string, ownerId?: string) =>
     partnerAccounts.find(
@@ -386,6 +434,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const tabs = [
     { id: 'overview' as const, label: 'Overview', icon: Activity },
+    {
+      id: 'rides' as const,
+      label: 'Rides & Alerts',
+      icon: BellRing,
+      badge: pendingActionableRides.length > 0 ? pendingActionableRides.length : undefined
+    },
     {
       id: 'routing' as const,
       label: 'Locality Routing',
@@ -537,6 +591,55 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           );
         })}
       </div>
+
+      {/* Persistent Admin Pending Ride Alert Bar */}
+      {(pendingActionableRides.length > 0 || alertAudioStatus?.snoozed || alertAudioStatus?.muted) && (
+        <div className="bg-amber-950/90 border-b border-amber-500/40 px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 text-amber-200">
+            <BellRing
+              className={`w-4 h-4 shrink-0 ${
+                alertAudioStatus?.isRinging ? 'text-amber-300 animate-bounce' : 'text-amber-400'
+              }`}
+            />
+            <span className="font-bold">
+              {pendingActionableRides.length > 0
+                ? `${pendingActionableRides.length} Pending Ride Request(s) awaiting confirmation`
+                : alertAudioStatus?.muted
+                ? 'Admin Ride Alerts Muted'
+                : `Admin Alerts Snoozed (${alertAudioStatus?.snoozeRemainingSec || 0}s)`}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {onToggleAlertMute && (
+              <button
+                type="button"
+                onClick={onToggleAlertMute}
+                className="px-2.5 py-1 rounded-lg bg-slate-900 text-amber-200 font-bold border border-amber-600/40 flex items-center gap-1"
+              >
+                {alertAudioStatus?.muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                <span>{alertAudioStatus?.muted ? 'Unmute' : 'Mute'}</span>
+              </button>
+            )}
+            {onSnoozeAlerts && (
+              <button
+                type="button"
+                onClick={() => onSnoozeAlerts(alertAudioStatus?.snoozed ? 0 : 5 * 60 * 1000)}
+                className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold flex items-center gap-1"
+              >
+                {alertAudioStatus?.snoozed ? <Bell className="w-3.5 h-3.5" /> : <BellOff className="w-3.5 h-3.5" />}
+                <span>{alertAudioStatus?.snoozed ? 'Resume' : 'Snooze 5m'}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setActiveTab('rides')}
+              className="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold"
+            >
+              View Rides
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1 p-4 max-w-5xl mx-auto w-full space-y-4">
@@ -718,6 +821,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
             </div>
           </div>
+        )}
+
+        {/* RIDES & SMART ALERTS MONITOR TAB */}
+        {activeTab === 'rides' && (
+          <AdminRidesMonitorTab
+            rideBookings={rideBookings}
+            rideDispatchSummaries={rideDispatchSummaries}
+            drivers={drivers}
+            routingConfig={resolvedRoutingConfig}
+            partnerAccounts={partnerAccounts}
+            localities={localities}
+            notificationTokens={notificationTokens}
+            rideNotificationLogs={rideNotificationLogs}
+            focusedRideId={focusedRideId}
+            alertAudioStatus={alertAudioStatus}
+            notificationPermission={notificationPermission}
+            onToggleAlertMute={onToggleAlertMute}
+            onSnoozeAlerts={onSnoozeAlerts}
+            onUnlockAndTestAudio={onUnlockAndTestAudio}
+            onEnablePushNotifications={onEnablePushNotifications}
+            onAssignPartnerWithRouting={onAssignPartnerWithRouting}
+            onCancelRide={onCancelRide}
+            onExpireRide={onExpireRide}
+          />
         )}
 
         {/* DOCTORS TAB */}

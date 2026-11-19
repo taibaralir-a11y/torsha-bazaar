@@ -64,7 +64,7 @@ test('firestore.rules protects products, scrapRequests, public directories, admi
     RULES_TEXT.indexOf('match /orders/{orderId}'),
     RULES_TEXT.indexOf('match /localities/{localityId}')
   );
-  assert.ok(ordersBlock.includes("existing().status in ['pending', 'placed', 'confirmed', 'preparing']"));
+  assert.ok(ordersBlock.includes("existing().status in ['pending', 'placed', 'confirmed', 'preparing', 'packed', 'ready_for_dispatch']"));
   assert.ok(ordersBlock.includes('isEligibleOnlineDeliveryRiderForShop'));
 
   // Routing alerts require deterministic rt-alert-<requestId> and existsAfter/getAfter match

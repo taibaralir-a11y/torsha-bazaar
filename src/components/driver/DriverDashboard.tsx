@@ -21,7 +21,14 @@ import {
   Check,
   X,
   MessageSquare,
-  LogOut
+  LogOut,
+  Bell,
+  BellOff,
+  BellRing,
+  Volume2,
+  VolumeX,
+  WifiOff,
+  Lock
 } from 'lucide-react';
 import {
   Driver,
@@ -34,9 +41,14 @@ import {
   FareOffer
 } from '../../types';
 import {
-  evaluateRideDriverEligibility,
-  resolveAreaKey
-} from '../../utils/hyperlocalRouting';
+  getActionableRidesForDriver,
+  getRideRemainingSeconds,
+  isDriverEligibleForPendingRide,
+  isRideOfferExpired,
+  normalizeRideStatus,
+  validateCounterOfferAmount
+} from '../../utils/rideLifecycle';
+import { INITIAL_SERVICE_LOCALITIES } from '../../utils/hyperlocalRouting';
 import { PWAInstallButton } from '../common/PWAInstallButton';
 
 interface DriverActionResult {
@@ -68,6 +80,22 @@ interface DriverDashboardProps {
     note?: string
   ) => Promise<DriverActionResult | void> | void;
   onDriverRejectRide?: (rideId: string, driverId: string) => Promise<DriverActionResult | void> | void;
+  onExpireRide?: (rideId: string) => Promise<DriverActionResult | void> | void;
+  focusedRideId?: string | null;
+  alertAudioStatus?: {
+    muted: boolean;
+    snoozed: boolean;
+    snoozeRemainingSec: number;
+    activeCount: number;
+    isRinging: boolean;
+    unlocked: boolean;
+  };
+  onToggleAlertMute?: () => void;
+  onSnoozeAlerts?: (durationMs?: number) => void;
+  onUnlockAndTestAudio?: () => Promise<boolean> | void;
+  onEnablePushNotifications?: () => Promise<void> | void;
+  notificationPermission?: 'granted' | 'denied' | 'default' | 'unsupported';
+  isOnlineNetwork?: boolean;
   onLogout?: () => void;
 }
 
@@ -82,6 +110,15 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
   onAcceptRide,
   onDriverCounterOffer,
   onDriverRejectRide,
+  onExpireRide,
+  focusedRideId,
+  alertAudioStatus,
+  onToggleAlertMute,
+  onSnoozeAlerts,
+  onUnlockAndTestAudio,
+  onEnablePushNotifications,
+  notificationPermission = 'default',
+  isOnlineNetwork = true,
   onLogout
 }) => {
   const [activeTab, setActiveTab] = useState<'rides' | 'active' | 'history' | 'profile'>('rides');
@@ -102,45 +139,68 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
   const [actionNotice, setActionNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [isSubmittingAction, setIsSubmittingAction] = useState(false);
   const [confirmCancelRideId, setConfirmCancelRideId] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const prevAvailableSignatureRef = React.useRef<string>('');
 
-  // Available rides strictly filtered by Admin locality routing, online status, approval, and vehicle type
-  const availableRides = rideBookings.filter((r) => {
-    if (rejectedRideIds.includes(r.id)) return false;
-    const isMatchingVehicle = !r.vehicleType || r.vehicleType === driver.vehicleType;
-    const isWaitingStatus = [
-      'requested', 
-      'searching', 
-      'REQUESTED', 
-      'OFFER_SENT', 
-      'COUNTER_OFFERED'
-    ].includes(r.status);
-    
-    // Do not show in available if already assigned to someone else
-    if (r.driverId && r.driverId !== driver.id) return false;
-    if (!isMatchingVehicle || !isWaitingStatus) return false;
+  const effectiveRoutingConfig: UniversalRoutingConfig = routingConfig || {
+    globalCrossLocalityEnabled: false,
+    updatedAt: '',
+    rulesByLocality: {}
+  };
 
-    const reqLoc = r.pickupLocality || r.pickupLocation;
-    if (routingConfig) {
-      return evaluateRideDriverEligibility(
-        reqLoc,
-        r.vehicleType || driver.vehicleType,
-        driver,
-        routingConfig,
-        partnerAccounts
-      ).isEligible;
-    }
-    return (
-      driver.status === 'approved' &&
-      driver.isOnline &&
-      resolveAreaKey(reqLoc) === resolveAreaKey(driver.currentLocation || driver.locality || '')
-    );
+  // Available rides strictly filtered by Admin locality routing, online status, approval, vehicle type & active expiry
+  const availableRides = getActionableRidesForDriver({
+    rides: rideBookings,
+    driver,
+    routingConfig: effectiveRoutingConfig,
+    partnerAccounts,
+    localities: INITIAL_SERVICE_LOCALITIES,
+    localRejectedIds: new Set(rejectedRideIds),
+    nowMs
   });
 
   // Active ride currently confirmed or assigned to this driver
   const currentAssignedRide = rideBookings.find(
-    (r) => r.driverId === driver.id && 
-           ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started'].includes(r.status)
+    (r) =>
+      r.driverId === driver.id &&
+      ['CONFIRMED', 'PICKUP', 'IN_PROGRESS'].includes(normalizeRideStatus(r.status))
   );
+
+  // Live 1s countdown tick while pending rides exist + expiry trigger
+  React.useEffect(() => {
+    if (availableRides.length === 0) return;
+    const timer = window.setInterval(() => {
+      const t = Date.now();
+      setNowMs(t);
+      if (onExpireRide) {
+        availableRides.forEach((ride) => {
+          if (isRideOfferExpired(ride, t)) {
+            onExpireRide(ride.id);
+          }
+        });
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [availableRides.length, onExpireRide]);
+
+  // Auto-navigate to relevant tab on new actionable ride or notification deep link
+  React.useEffect(() => {
+    if (focusedRideId) {
+      if (currentAssignedRide?.id === focusedRideId) {
+        setActiveTab('active');
+        return;
+      }
+      if (availableRides.some((r) => r.id === focusedRideId)) {
+        setActiveTab('rides');
+        return;
+      }
+    }
+    const sig = availableRides.map((r) => `${r.id}:${r.currentRound || 1}`).sort().join('|');
+    if (availableRides.length > 0 && sig !== prevAvailableSignatureRef.current && !currentAssignedRide) {
+      setActiveTab('rides');
+    }
+    prevAvailableSignatureRef.current = sig;
+  }, [focusedRideId, availableRides, currentAssignedRide?.id]);
 
   // Completed or past rides by this driver
   const myCompletedRides = rideBookings.filter(
@@ -191,23 +251,36 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
   const handleSendCounterOffer = async () => {
     if (!counterModalRide || isSubmittingAction) return;
     setActionNotice(null);
+    const check = validateCounterOfferAmount({
+      amount: counterAmount,
+      currentRound: (counterModalRide.currentRound || 1) + 1,
+      maxRounds: counterModalRide.maxNegotiationRounds || 5
+    });
+    if (!check.valid) {
+      setActionNotice({ type: 'err', text: check.reason || 'Invalid counter offer fare.' });
+      return;
+    }
     if (onDriverCounterOffer) {
       setIsSubmittingAction(true);
       try {
         const res = await onDriverCounterOffer(
           counterModalRide.id,
           driver,
-          counterAmount,
+          check.amount,
           counterNote.trim() || undefined
         );
         if (res && res.ok === false) {
           setActionNotice({
             type: 'err',
-            text: res.error || 'Sending counter-offers requires backend Cloud Functions dispatch.'
+            text: res.error || 'Unable to submit counter-offer.'
           });
           setCounterModalRide(null);
           return;
         }
+        setActionNotice({
+          type: 'ok',
+          text: `Counter-offer ₹${check.amount} sent for ride ${counterModalRide.id}.`
+        });
       } finally {
         setIsSubmittingAction(false);
       }
@@ -346,6 +419,78 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
             </button>
           </div>
         )}
+
+        {/* Smart Ride Alert & Sound Control Bar */}
+        <div className="mt-2.5 bg-emerald-950/70 border border-emerald-700/70 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <div className="flex items-center gap-2">
+            <BellRing
+              className={`w-4 h-4 ${
+                alertAudioStatus?.isRinging ? 'text-amber-300 animate-bounce' : 'text-emerald-300'
+              }`}
+            />
+            <div>
+              <span className="font-bold text-white block">
+                {alertAudioStatus?.isRinging
+                  ? `ALERT RINGING • ${availableRides.length} Pending Ride(s)`
+                  : alertAudioStatus?.snoozed
+                  ? `Alerts Snoozed (${alertAudioStatus.snoozeRemainingSec}s)`
+                  : alertAudioStatus?.muted
+                  ? 'Ride Alert Sound Muted'
+                  : 'Smart Ride Alerts Ready'}
+              </span>
+              {!isOnlineNetwork && (
+                <span className="text-amber-300 flex items-center gap-1">
+                  <WifiOff className="w-3 h-3" /> Offline — Reconnecting automatically
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {onToggleAlertMute && (
+              <button
+                type="button"
+                onClick={onToggleAlertMute}
+                className={`px-2 py-1 rounded-lg font-bold flex items-center gap-1 ${
+                  alertAudioStatus?.muted
+                    ? 'bg-rose-600 text-white'
+                    : 'bg-emerald-700 hover:bg-emerald-600 text-white'
+                }`}
+              >
+                {alertAudioStatus?.muted ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+                <span>{alertAudioStatus?.muted ? 'Unmute' : 'Mute'}</span>
+              </button>
+            )}
+            {onSnoozeAlerts && (
+              <button
+                type="button"
+                onClick={() => onSnoozeAlerts(alertAudioStatus?.snoozed ? 0 : 5 * 60 * 1000)}
+                className="px-2 py-1 rounded-lg font-bold bg-amber-600 hover:bg-amber-500 text-white flex items-center gap-1"
+              >
+                {alertAudioStatus?.snoozed ? <Bell className="w-3 h-3" /> : <BellOff className="w-3 h-3" />}
+                <span>{alertAudioStatus?.snoozed ? 'Resume' : 'Snooze 5m'}</span>
+              </button>
+            )}
+            {onUnlockAndTestAudio && (
+              <button
+                type="button"
+                onClick={() => onUnlockAndTestAudio()}
+                className="px-2 py-1 rounded-lg font-bold bg-slate-800 hover:bg-slate-700 text-emerald-200"
+              >
+                {alertAudioStatus?.unlocked ? 'Test Tone' : 'Enable Sound'}
+              </button>
+            )}
+            {onEnablePushNotifications && notificationPermission !== 'granted' && notificationPermission !== 'unsupported' && (
+              <button
+                type="button"
+                onClick={() => onEnablePushNotifications()}
+                className="px-2 py-1 rounded-lg font-bold bg-sky-600 hover:bg-sky-500 text-white"
+              >
+                Enable Push
+              </button>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -459,11 +604,15 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                 const guidanceFare = ride.suggestedFare || ride.estimatedFare;
                 const hasDriverCountered = ride.activeDriverOffers?.some((o) => o.driverId === driver.id && o.status === 'pending');
                 const myPendingOffer = ride.activeDriverOffers?.find((o) => o.driverId === driver.id && o.status === 'pending');
+                const remainingSec = getRideRemainingSeconds(ride, nowMs);
+                const isFocused = focusedRideId === ride.id;
 
                 return (
                   <div
                     key={ride.id}
-                    className="bg-white rounded-2xl border-2 border-emerald-100 p-4 shadow-sm hover:shadow-md transition-all space-y-3"
+                    className={`bg-white rounded-2xl border-2 p-4 shadow-sm hover:shadow-md transition-all space-y-3 ${
+                      isFocused ? 'border-amber-500 ring-2 ring-amber-300/60' : 'border-emerald-200'
+                    }`}
                   >
                     {/* Header info */}
                     <div className="flex items-center justify-between pb-2 border-b border-gray-100">
@@ -474,8 +623,16 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                         <span className="text-[10px] uppercase font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded">
                           {ride.vehicleType.toUpperCase()}
                         </span>
+                        <span className="text-[10px] font-bold px-2 py-0.5 bg-slate-100 text-slate-700 rounded">
+                          Round {ride.currentRound || 1}/{ride.maxNegotiationRounds || 5}
+                        </span>
                       </div>
-                      <span className="text-xs text-gray-500">~{ride.distanceKm || 3.5} km</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-mono font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded flex items-center gap-1">
+                          <Clock className="w-3 h-3" /> {remainingSec}s
+                        </span>
+                        <span className="text-xs text-gray-500">~{ride.distanceKm || 3.5} km</span>
+                      </div>
                     </div>
 
                     {/* Customer Fare Banner */}
@@ -501,7 +658,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                         <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 mt-1 shrink-0" />
                         <div>
                           <span className="text-gray-400 font-medium">Pickup Area:</span>
-                          <p className="font-bold text-gray-900">{ride.pickupLocation}</p>
+                          <p className="font-bold text-gray-900">{ride.pickupLocality || ride.pickupLocation}</p>
                         </div>
                       </div>
 
@@ -509,16 +666,28 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                         <div className="w-2.5 h-2.5 rounded-full bg-red-500 mt-1 shrink-0" />
                         <div>
                           <span className="text-gray-400 font-medium">Drop Area:</span>
-                          <p className="font-bold text-gray-900">{ride.dropLocation}</p>
+                          <p className="font-bold text-gray-900">{ride.dropLocality || ride.dropLocation}</p>
                         </div>
                       </div>
 
                       {/* Passenger info (privacy protected until mutual confirmation) */}
                       <div className="pt-2 flex items-center justify-between text-gray-600 bg-slate-50 p-2 rounded-lg text-[11px]">
                         <span>Passenger: <strong>Verified Rider Request</strong></span>
-                        <span className="text-gray-400 italic">Name, phone & landmarks unlock on confirmation</span>
+                        <span className="text-gray-400 italic flex items-center gap-1">
+                          <Lock className="w-3 h-3" /> Name, phone & landmarks unlock on confirmation
+                        </span>
                       </div>
                     </div>
+
+                    {ride.negotiationHistory && ride.negotiationHistory.length > 1 && (
+                      <div className="bg-slate-50 rounded-xl p-2 border border-slate-200 flex flex-wrap gap-1">
+                        {ride.negotiationHistory.slice(-4).map((h, i) => (
+                          <span key={h.id || i} className="text-[10px] bg-white border border-slate-200 rounded px-1.5 py-0.5 text-slate-700">
+                            R{h.roundNumber}: {h.offeredBy === 'customer' ? 'Customer' : 'Rider'} ₹{h.amount}
+                          </span>
+                        ))}
+                      </div>
+                    )}
 
                     {/* If driver already submitted a counter offer, show status */}
                     {hasDriverCountered && myPendingOffer && (
