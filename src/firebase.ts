@@ -151,16 +151,16 @@ export async function resolvePartnerLoginEmail(identifier: string): Promise<stri
 const LOGOUT_FLAG_KEY = 'tb_explicit_logout';
 let inFlightAuthPromise: Promise<User | null> | null = null;
 let lastAuthError: { code?: string; message?: string } | null = null;
+let anonymousAuthDisabled = false;
 
 export function getLastAuthError() {
   return lastAuthError;
 }
 
 /**
- * Ensures a valid cryptographic Firebase Auth session is active for guest/partner convenience.
- * Waits for Firebase Auth persistence restoration first so existing UIDs
- * are reused across sessions without creating duplicate anonymous accounts.
- * Operates at ₹0 on Firebase Spark Plan.
+ * Restores an existing authenticated Firebase session on load.
+ * Does not trigger `signInAnonymously` automatically because Anonymous Auth
+ * is disabled on this project (calling it produces HTTP 400 console errors).
  */
 export async function ensureAuthSession(forceCreate = false): Promise<User | null> {
   try {
@@ -175,7 +175,11 @@ export async function ensureAuthSession(forceCreate = false): Promise<User | nul
     return auth.currentUser;
   }
 
-  // If user explicitly logged out and hasn't triggered a new sign-in/register, keep signed out
+  // Only restore existing authenticated sessions unless explicitly forced and not disabled
+  if (!forceCreate || anonymousAuthDisabled) {
+    return null;
+  }
+
   let wasExplicitLogout = false;
   try {
     wasExplicitLogout = sessionStorage.getItem(LOGOUT_FLAG_KEY) === 'true';
@@ -196,6 +200,12 @@ export async function ensureAuthSession(forceCreate = false): Promise<User | nul
       try { sessionStorage.removeItem(LOGOUT_FLAG_KEY); } catch {}
       return cred.user;
     } catch (err: any) {
+      if (
+        err?.code === 'auth/admin-restricted-operation' ||
+        err?.code === 'auth/operation-not-allowed'
+      ) {
+        anonymousAuthDisabled = true;
+      }
       lastAuthError = {
         code: err?.code,
         message: err?.message
@@ -230,7 +240,7 @@ export async function handleAuthSignOut(): Promise<void> {
 
 export { onAuthStateChanged, signInWithEmailAndPassword, sendPasswordResetEmail, GoogleAuthProvider, signInWithPopup };
 
-// Automatically bootstrap/restore session on load
+// Automatically restore existing session on load without issuing anonymous signUp requests
 ensureAuthSession(false).catch(() => {});
 
 import { cleanForFirestore } from './utils/firestoreClean';
@@ -303,10 +313,10 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Startup connection verification
+// Startup connection verification against publicly readable routing config
 async function testConnection() {
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
+    await getDocFromServer(doc(db, 'routingConfig', 'universal'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
       console.warn('Firestore offline or connecting: ', error.message);

@@ -193,8 +193,25 @@ export function canTransitionRideStatus(
     };
   }
 
-  if (to === 'IN_PROGRESS' && from !== 'PICKUP' && from !== 'CONFIRMED') {
-    return { allowed: false, from, to, reason: 'Ride must be confirmed/at pickup before starting trip.' };
+  if (to === 'IN_PROGRESS' && from !== 'PICKUP' && (actor === 'driver' || from !== 'CONFIRMED')) {
+    return {
+      allowed: false,
+      from,
+      to,
+      reason:
+        actor === 'driver'
+          ? 'Mark Arrived at Pickup (PICKUP) before starting the trip.'
+          : 'Ride must be confirmed/at pickup before starting trip.'
+    };
+  }
+
+  if (to === 'COMPLETED' && actor === 'driver' && from !== 'IN_PROGRESS') {
+    return {
+      allowed: false,
+      from,
+      to,
+      reason: 'Start the trip (IN_PROGRESS) before marking it completed.'
+    };
   }
 
   if (to === 'COMPLETED' && actor === 'customer') {

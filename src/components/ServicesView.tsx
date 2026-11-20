@@ -30,7 +30,7 @@ import {
 interface ServicesViewProps {
   onBackToHome: () => void;
   currentLocation: string;
-  onRequestService?: (req: any) => void;
+  onRequestService?: (req: any) => Promise<{ ok: boolean; error?: string } | void> | void;
   customerName?: string;
   customerPhone?: string;
   serviceProviders?: ServiceProvider[];
@@ -55,6 +55,8 @@ export const ServicesView: React.FC<ServicesViewProps> = ({
   const [address, setAddress] = useState(currentLocation);
   const [phone, setPhone] = useState(customerPhone);
   const [serviceBooked, setServiceBooked] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
 
   const renderServiceIcon = (iconName: string) => {
     switch (iconName) {
@@ -100,27 +102,38 @@ export const ServicesView: React.FC<ServicesViewProps> = ({
     'Tomorrow Afternoon (12 PM - 3 PM)'
   ];
 
-  const handleBooking = (e: React.FormEvent) => {
+  const handleBooking = async (e: React.FormEvent) => {
     e.preventDefault();
-    setServiceBooked(true);
+    if (isSubmitting) return;
+    setSubmitError('');
 
     if (onRequestService) {
-      onRequestService({
-        id: `TB-SRV-${Math.floor(500 + Math.random() * 500)}`,
-        customerName: customerName || 'Customer',
-        customerPhone: phone || customerPhone,
-        category: selectedService.name,
-        address,
-        locality: requestArea,
-        preferredDate: bookingDate.includes('Today') ? 'Today' : 'Tomorrow',
-        preferredTime: bookingDate,
-        issueDescription: `Service request for ${selectedService.name} (${selectedService.popularFor})`,
-        estimatedFee: selectedService.startingPrice,
-        status: 'requested',
-        routingStatus: eligibleProviders.length > 0 ? 'pending_admin_routing' : 'unavailable_in_locality',
-        createdAt: new Date().toISOString()
-      });
+      setIsSubmitting(true);
+      try {
+        const res = await onRequestService({
+          id: `TB-SRV-${Math.floor(500 + Math.random() * 500)}`,
+          customerName: customerName || 'Customer',
+          customerPhone: phone || customerPhone,
+          category: selectedService.name,
+          address,
+          locality: requestArea,
+          preferredDate: bookingDate.includes('Today') ? 'Today' : 'Tomorrow',
+          preferredTime: bookingDate,
+          issueDescription: `Service request for ${selectedService.name} (${selectedService.popularFor})`,
+          estimatedFee: selectedService.startingPrice,
+          status: 'requested',
+          routingStatus: eligibleProviders.length > 0 ? 'pending_admin_routing' : 'unavailable_in_locality',
+          createdAt: new Date().toISOString()
+        });
+        if (res && res.ok === false) {
+          setSubmitError(res.error || 'Could not submit service request.');
+          return;
+        }
+      } finally {
+        setIsSubmitting(false);
+      }
     }
+    setServiceBooked(true);
   };
 
   return (
@@ -295,11 +308,19 @@ export const ServicesView: React.FC<ServicesViewProps> = ({
                 <span>30-Day Service Warranty • Background Verified Local Technicians</span>
               </div>
 
+              {submitError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-medium flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+                  <span>{submitError}</span>
+                </div>
+              )}
+
               <button
                 type="submit"
-                className="w-full bg-[#0E7438] hover:bg-emerald-800 text-white font-bold py-3 rounded-2xl shadow-md text-sm active:scale-95 transition-all"
+                disabled={isSubmitting}
+                className="w-full bg-[#0E7438] hover:bg-emerald-800 disabled:opacity-60 text-white font-bold py-3 rounded-2xl shadow-md text-sm active:scale-95 transition-all"
               >
-                Book Inspection • ₹{selectedService.startingPrice}
+                {isSubmitting ? 'Submitting Booking...' : `Book Inspection • ₹${selectedService.startingPrice}`}
               </button>
             </form>
           </>

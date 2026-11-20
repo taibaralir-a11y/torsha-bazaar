@@ -37,7 +37,7 @@ interface EmergencyDoctorModalProps {
   doctors: Doctor[];
   emergencyRequests: EmergencyDoctorRequest[];
   user: UserProfile;
-  onRequestDoctor: (newRequest: Omit<EmergencyDoctorRequest, 'id' | 'createdAt'>) => void;
+  onRequestDoctor: (newRequest: Omit<EmergencyDoctorRequest, 'id' | 'createdAt'>) => Promise<{ ok: boolean; error?: string } | void> | void;
   localities?: LocalityInfo[];
 }
 
@@ -75,7 +75,8 @@ export const EmergencyDoctorModal: React.FC<EmergencyDoctorModalProps> = ({
   const [detectedGps, setDetectedGps] = useState<{ lat: number; lng: number } | null>(null);
   const [isDetectingGps, setIsDetectingGps] = useState(false);
   const [crossLocalityApproved, setCrossLocalityApproved] = useState(false);
-  const [submittedId, setSubmittedId] = useState<string | null>(null);
+  const [formError, setFormError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!isOpen) return null;
 
@@ -90,8 +91,9 @@ export const EmergencyDoctorModal: React.FC<EmergencyDoctorModalProps> = ({
   );
 
   const handleGpsDetect = () => {
+    setFormError('');
     if (!navigator.geolocation) {
-      alert('Geolocation is not supported by your browser.');
+      setFormError('Geolocation is not supported by your browser.');
       return;
     }
     setIsDetectingGps(true);
@@ -109,15 +111,17 @@ export const EmergencyDoctorModal: React.FC<EmergencyDoctorModalProps> = ({
     );
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setFormError('');
     if (!patientName.trim() || !patientPhone.trim() || !symptoms.trim() || !address.trim()) {
-      alert('Please fill in all mandatory patient and address details.');
+      setFormError('Please fill in all mandatory patient and address details.');
       return;
     }
 
     if (localDoctors.length === 0 && otherDoctors.length > 0 && !crossLocalityApproved) {
-      alert(`No doctors are currently based inside ${locality}. Please check the approval box to request doctors from neighboring Dooars areas.`);
+      setFormError(`No doctors are currently based inside ${locality}. Please check the approval box to request doctors from neighboring Dooars areas.`);
       return;
     }
 
@@ -137,8 +141,17 @@ export const EmergencyDoctorModal: React.FC<EmergencyDoctorModalProps> = ({
       customerId: user?.id
     };
 
-    onRequestDoctor(payload);
-    setActiveTab('my_requests');
+    setIsSubmitting(true);
+    try {
+      const res = await onRequestDoctor(payload);
+      if (res && res.ok === false) {
+        setFormError(res.error || 'Could not submit emergency doctor request.');
+        return;
+      }
+      setActiveTab('my_requests');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -445,13 +458,21 @@ export const EmergencyDoctorModal: React.FC<EmergencyDoctorModalProps> = ({
               )}
             </div>
 
+            {formError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                <span>{formError}</span>
+              </div>
+            )}
+
             {/* Submit Button */}
             <button
               type="submit"
-              className="w-full py-3.5 px-4 bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-700 hover:to-rose-800 text-white font-extrabold text-sm rounded-2xl shadow-lg shadow-red-700/20 active:scale-98 transition flex items-center justify-center gap-2"
+              disabled={isSubmitting}
+              className="w-full py-3.5 px-4 bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-700 hover:to-rose-800 disabled:opacity-60 text-white font-extrabold text-sm rounded-2xl shadow-lg shadow-red-700/20 active:scale-98 transition flex items-center justify-center gap-2"
             >
               <HeartHandshake className="w-5 h-5" />
-              <span>Submit Urgent Doctor Request</span>
+              <span>{isSubmitting ? 'Submitting Request...' : 'Submit Urgent Doctor Request'}</span>
             </button>
           </form>
         )}

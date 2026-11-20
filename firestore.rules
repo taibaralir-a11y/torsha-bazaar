@@ -45,112 +45,152 @@ service cloud.firestore {
     }
 
     function hasVerifiedEmailToken() {
-      return hasTokenKey('email') &&
-        hasTokenKey('email_verified') &&
-        request.auth.token.email is string &&
-        request.auth.token.email_verified == true;
+      return request.auth != null &&
+        request.auth.token != null &&
+        ('email_verified' in request.auth.token) &&
+        request.auth.token.email_verified == true &&
+        ('email' in request.auth.token) &&
+        request.auth.token.email is string;
     }
 
     // Verified Super Admin: requires cryptographic Firebase Auth token with
     // verified email matching the authorized platform owner.
     function isAdmin() {
-      return isSignedIn() &&
-        hasVerifiedEmailToken() &&
+      return request.auth != null &&
+        request.auth.token != null &&
+        ('email_verified' in request.auth.token) &&
+        request.auth.token.email_verified == true &&
+        ('email' in request.auth.token) &&
         request.auth.token.email == 'taibaralir@gmail.com';
     }
 
     // Role Account lookup: Admin-provisioned /partnerAccounts/{uid}
     function hasPartnerAccount() {
-      return isSignedIn() &&
+      return request.auth != null &&
         exists(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid));
+    }
+
+    function checkPartnerRoleDoc(paData, allowedRoles) {
+      return paData.status == 'active' && paData.role in allowedRoles;
     }
 
     function hasPartnerRole(allowedRoles) {
       return hasPartnerAccount() &&
-        get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.status == 'active' &&
-        get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.role in allowedRoles;
+        checkPartnerRoleDoc(get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data, allowedRoles);
+    }
+
+    function checkPartnerEntityMatch(paData, allowedRoles, entityId) {
+      return paData.status == 'active' &&
+        paData.role in allowedRoles &&
+        paData.linkedEntityId == entityId;
     }
 
     function hasPartnerAccountForEntity(allowedRoles, entityId) {
-      return hasPartnerRole(allowedRoles) &&
-        entityId is string &&
+      return request.auth != null &&
         isValidId(entityId) &&
+        exists(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)) &&
         ('linkedEntityId' in get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data) &&
-        get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.linkedEntityId is string &&
-        isValidId(get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.linkedEntityId) &&
-        get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.linkedEntityId == entityId;
+        checkPartnerEntityMatch(
+          get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data,
+          allowedRoles,
+          entityId
+        );
+    }
+
+    function checkOwnerPartnerDoc(paData, expectedRole, entityId) {
+      return paData.status == 'active' &&
+        paData.role == expectedRole &&
+        ('linkedEntityId' in paData) &&
+        paData.linkedEntityId == entityId;
     }
 
     // Active partner account verification for an arbitrary entity owner (never falls back to empty ownerId)
     function isActivePartnerOwnerAccount(ownerId, expectedRole, entityId) {
       return ownerId is string &&
-        isValidId(ownerId) &&
+        ownerId.size() > 0 &&
+        ownerId.size() <= 128 &&
         exists(/databases/$(database)/documents/partnerAccounts/$(ownerId)) &&
-        get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data.status == 'active' &&
-        get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data.role == expectedRole &&
-        ('linkedEntityId' in get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data) &&
-        get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data.linkedEntityId == entityId;
+        checkOwnerPartnerDoc(
+          get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data,
+          expectedRole,
+          entityId
+        );
+    }
+
+    function checkEmployerDoc(paData) {
+      let pa = paData;
+      return pa.status == 'active' && pa.role == 'employer';
     }
 
     function isActiveEmployerAccount(ownerId) {
-      return ownerId is string &&
-        isValidId(ownerId) &&
+      return isValidId(ownerId) &&
         exists(/databases/$(database)/documents/partnerAccounts/$(ownerId)) &&
-        get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data.status == 'active' &&
-        get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data.role == 'employer';
+        checkEmployerDoc(get(/databases/$(database)/documents/partnerAccounts/$(ownerId)).data);
     }
 
     // Relational shop approval check (server-side doc check via get/exists)
     function isShopApproved(shopId) {
-      return shopId is string &&
-        isValidId(shopId) &&
+      return isValidId(shopId) &&
         exists(/databases/$(database)/documents/shops/$(shopId)) &&
         get(/databases/$(database)/documents/shops/$(shopId)).data.status == 'approved';
     }
 
+    function checkApprovedOwnedEntity(entityData) {
+      return entityData.status == 'approved' && entityData.ownerId == request.auth.uid;
+    }
+
     // Relational shop ownership check (must be an active shopkeeper account & approved shop owned by caller)
     function isApprovedShopOwner(shopId) {
-      return isSignedIn() &&
+      return request.auth != null &&
         hasPartnerAccountForEntity(['shopkeeper'], shopId) &&
-        isShopApproved(shopId) &&
-        get(/databases/$(database)/documents/shops/$(shopId)).data.ownerId == request.auth.uid;
+        exists(/databases/$(database)/documents/shops/$(shopId)) &&
+        checkApprovedOwnedEntity(get(/databases/$(database)/documents/shops/$(shopId)).data);
     }
 
     // Relational doctor ownership check (must be an active doctor account & approved doctor owned by caller)
     function isApprovedDoctorOwner(doctorDocId) {
-      return isSignedIn() &&
+      return request.auth != null &&
         hasPartnerAccountForEntity(['doctor'], doctorDocId) &&
         exists(/databases/$(database)/documents/doctors/$(doctorDocId)) &&
-        get(/databases/$(database)/documents/doctors/$(doctorDocId)).data.ownerId == request.auth.uid &&
-        get(/databases/$(database)/documents/doctors/$(doctorDocId)).data.status == 'approved';
+        checkApprovedOwnedEntity(get(/databases/$(database)/documents/doctors/$(doctorDocId)).data);
     }
 
     // Relational driver approval & ownership checks
     function isApprovedDriverRecord(driverDocId) {
-      return driverDocId is string &&
-        isValidId(driverDocId) &&
+      return isValidId(driverDocId) &&
         exists(/databases/$(database)/documents/drivers/$(driverDocId)) &&
         get(/databases/$(database)/documents/drivers/$(driverDocId)).data.status == 'approved';
     }
 
     function isApprovedDriverOwner(driverDocId) {
-      return isSignedIn() &&
+      return request.auth != null &&
         hasPartnerAccountForEntity(['driver'], driverDocId) &&
-        isApprovedDriverRecord(driverDocId) &&
-        get(/databases/$(database)/documents/drivers/$(driverDocId)).data.ownerId == request.auth.uid;
+        exists(/databases/$(database)/documents/drivers/$(driverDocId)) &&
+        checkApprovedOwnedEntity(get(/databases/$(database)/documents/drivers/$(driverDocId)).data);
     }
 
     function callerDriverId() {
       return get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data.linkedEntityId;
     }
 
+    function isApprovedDriverDocOwned(drvId) {
+      return drvId is string &&
+        drvId.size() > 0 &&
+        exists(/databases/$(database)/documents/drivers/$(drvId)) &&
+        checkApprovedOwnedEntity(get(/databases/$(database)/documents/drivers/$(drvId)).data);
+    }
+
+    function checkActiveDriverPartner(pa) {
+      return pa.status == 'active' &&
+        pa.role == 'driver' &&
+        ('linkedEntityId' in pa) &&
+        isApprovedDriverDocOwned(pa.linkedEntityId);
+    }
+
     function isActiveApprovedDriver() {
-      return isSignedIn() &&
-        hasPartnerRole(['driver']) &&
-        ('linkedEntityId' in get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data) &&
-        isValidId(callerDriverId()) &&
-        isApprovedDriverRecord(callerDriverId()) &&
-        get(/databases/$(database)/documents/drivers/$(callerDriverId())).data.ownerId == request.auth.uid;
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)) &&
+        checkActiveDriverPartner(get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data);
     }
 
     function callerDriverVehicleType() {
@@ -159,26 +199,24 @@ service cloud.firestore {
 
     // Relational delivery rider approval & ownership checks
     function isApprovedRiderRecord(personDocId) {
-      return personDocId is string &&
-        isValidId(personDocId) &&
+      return isValidId(personDocId) &&
         exists(/databases/$(database)/documents/deliveryPersons/$(personDocId)) &&
         get(/databases/$(database)/documents/deliveryPersons/$(personDocId)).data.status == 'approved';
     }
 
     function isApprovedDeliveryOwner(personDocId) {
-      return isSignedIn() &&
+      return request.auth != null &&
         hasPartnerAccountForEntity(['delivery'], personDocId) &&
-        isApprovedRiderRecord(personDocId) &&
-        get(/databases/$(database)/documents/deliveryPersons/$(personDocId)).data.ownerId == request.auth.uid;
+        exists(/databases/$(database)/documents/deliveryPersons/$(personDocId)) &&
+        checkApprovedOwnedEntity(get(/databases/$(database)/documents/deliveryPersons/$(personDocId)).data);
     }
 
     // Relational service provider ownership check (providerId stores /serviceProviders/{providerId} doc ID)
     function isApprovedServiceProviderOwner(providerDocId) {
-      return isSignedIn() &&
+      return request.auth != null &&
         hasPartnerAccountForEntity(['service_provider'], providerDocId) &&
         exists(/databases/$(database)/documents/serviceProviders/$(providerDocId)) &&
-        get(/databases/$(database)/documents/serviceProviders/$(providerDocId)).data.ownerId == request.auth.uid &&
-        get(/databases/$(database)/documents/serviceProviders/$(providerDocId)).data.status == 'approved';
+        checkApprovedOwnedEntity(get(/databases/$(database)/documents/serviceProviders/$(providerDocId)).data);
     }
 
     // Relational job ownership check (must be an active employer account)
@@ -287,38 +325,46 @@ service cloud.firestore {
         );
     }
 
-    // Strict rider eligibility check for shopkeeper dispatch on /orders (<= 4 unique reads)
+    // Strict rider eligibility check for shopkeeper dispatch on /orders
+    function checkLocalityRuleForRider(riderId, riderData, loc, rule) {
+      return rule.crossLocalityEnabled == true &&
+        (
+          riderId in rule.deliveryRiderIds ||
+          ('servedLocalities' in riderData && loc in riderData.servedLocalities) ||
+          riderData.locality in rule.nearbyLocalities
+        );
+    }
+
+    function isCrossLocalityRiderAllowed(riderId, riderData, loc) {
+      let cfg = get(/databases/$(database)/documents/routingConfig/universal).data;
+      return exists(/databases/$(database)/documents/routingConfig/universal) &&
+        cfg.globalCrossLocalityEnabled == true &&
+        (loc in cfg.rulesByLocality) &&
+        checkLocalityRuleForRider(riderId, riderData, loc, cfg.rulesByLocality[loc]);
+    }
+
+    function checkRiderDocEligibility(riderId, rider, loc) {
+      return rider.status == 'approved' &&
+        rider.isOnline == true &&
+        ('ownerId' in rider) &&
+        isActivePartnerOwnerAccount(rider.ownerId, 'delivery', riderId) &&
+        (
+          (
+            rider.locality == loc &&
+            (!('currentLocation' in rider) || rider.currentLocation == '' || rider.currentLocation == loc)
+          ) ||
+          isCrossLocalityRiderAllowed(riderId, rider, loc)
+        );
+    }
+
     function isEligibleOnlineDeliveryRiderForShop(riderId, shopLocality) {
       return riderId is string &&
         isValidId(riderId) &&
         exists(/databases/$(database)/documents/deliveryPersons/$(riderId)) &&
-        get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.status == 'approved' &&
-        get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.isOnline == true &&
-        ('ownerId' in get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data) &&
-        isActivePartnerOwnerAccount(get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.ownerId, 'delivery', riderId) &&
-        (
-          (
-            get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.locality == shopLocality &&
-            (
-              !('currentLocation' in get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data) ||
-              get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.currentLocation == '' ||
-              get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.currentLocation == shopLocality
-            )
-          ) ||
-          (
-            exists(/databases/$(database)/documents/routingConfig/universal) &&
-            get(/databases/$(database)/documents/routingConfig/universal).data.globalCrossLocalityEnabled == true &&
-            (shopLocality in get(/databases/$(database)/documents/routingConfig/universal).data.rulesByLocality) &&
-            get(/databases/$(database)/documents/routingConfig/universal).data.rulesByLocality[shopLocality].crossLocalityEnabled == true &&
-            (
-              riderId in get(/databases/$(database)/documents/routingConfig/universal).data.rulesByLocality[shopLocality].deliveryRiderIds ||
-              (
-                'servedLocalities' in get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data &&
-                shopLocality in get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.servedLocalities
-              ) ||
-              get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data.locality in get(/databases/$(database)/documents/routingConfig/universal).data.rulesByLocality[shopLocality].nearbyLocalities
-            )
-          )
+        checkRiderDocEligibility(
+          riderId,
+          get(/databases/$(database)/documents/deliveryPersons/$(riderId)).data,
+          shopLocality
         );
     }
 
@@ -823,6 +869,208 @@ service cloud.firestore {
     }
 
     // =========================================================================
+    // PARAMETERIZED UPDATE HELPERS (LEAN EXPRESSION BUDGET < 1000 IN BOTH PASSES)
+    // =========================================================================
+    function isOrderImmutableFieldsMatch(inc, ext) {
+      return inc.customerId == ext.customerId &&
+        inc.shopId == ext.shopId &&
+        (!('shopOwnerId' in ext) || (('shopOwnerId' in inc) && inc.shopOwnerId == ext.shopOwnerId)) &&
+        inc.items == ext.items &&
+        inc.subtotal == ext.subtotal &&
+        inc.deliveryFee == ext.deliveryFee &&
+        inc.discount == ext.discount &&
+        inc.total == ext.total;
+    }
+
+    function canShopkeeperProgressOrderStatus(es, ins) {
+      return (es in ['pending', 'placed'] && ins in ['confirmed', 'rejected']) ||
+        (es == 'confirmed' && ins in ['confirmed', 'preparing', 'packed', 'ready_for_dispatch']) ||
+        (es == 'preparing' && ins in ['preparing', 'packed', 'ready_for_dispatch']) ||
+        (es in ['packed', 'ready_for_dispatch'] && ins in ['packed', 'ready_for_dispatch', 'out_for_delivery']);
+    }
+
+    function canRiderProgressOrder(diffKeys) {
+      return ('riderId' in existing()) &&
+        isApprovedDeliveryOwner(existing().riderId) &&
+        diffKeys.hasOnly(['status', 'updatedAt']) &&
+        (
+          (existing().status in ['confirmed', 'packed', 'ready_for_dispatch'] && incoming().status == 'out_for_delivery') ||
+          (existing().status == 'out_for_delivery' && incoming().status == 'delivered')
+        );
+    }
+
+    function canCustomerUpdateRideBookingNonConfirm() {
+      return (
+        incoming().status in ['CANCELLED', 'cancelled'] &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'cancelledAt', 'cancelledBy', 'updatedAt'])
+      ) ||
+      (
+        incoming().status == 'EXPIRED' &&
+        !('driverId' in existing()) &&
+        ('expiresAtMs' in existing()) &&
+        request.time.toMillis() > existing().expiresAtMs &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'expiredAt', 'updatedAt'])
+      ) ||
+      (
+        incoming().status in ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED'] &&
+        (!('customerProposedFare' in incoming()) || (incoming().customerProposedFare is number && incoming().customerProposedFare >= 10)) &&
+        !('driverId' in incoming()) &&
+        !('agreedFare' in incoming()) &&
+        !('driverId' in existing()) &&
+        existing().status in ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CUSTOMER_ACCEPTED', 'RIDER_ACCEPTED', 'requested', 'searching'] &&
+        (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'customerProposedFare', 'activeDriverOffers',
+          'negotiationHistory', 'currentRound', 'expiresAt', 'expiresAtMs', 'updatedAt'
+        ])
+      );
+    }
+
+    function canDriverProgressRideBooking() {
+      return incoming().status in ['PICKUP', 'driver_arriving', 'IN_PROGRESS', 'ride_started', 'COMPLETED', 'completed'] &&
+        ('driverId' in incoming()) &&
+        ('driverId' in existing()) &&
+        incoming().driverId == existing().driverId &&
+        incoming().customerId == existing().customerId &&
+        isApprovedDriverOwner(existing().driverId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'completedAt', 'updatedAt']) &&
+        (
+          (existing().status in ['CONFIRMED', 'accepted'] && incoming().status in ['PICKUP', 'driver_arriving']) ||
+          (existing().status in ['PICKUP', 'driver_arriving'] && incoming().status in ['IN_PROGRESS', 'ride_started']) ||
+          (existing().status in ['IN_PROGRESS', 'ride_started'] && incoming().status in ['COMPLETED', 'completed'])
+        );
+    }
+
+    function isRideDispatchInvariantMatch() {
+      return incoming().id == existing().id &&
+        incoming().rideId == existing().rideId &&
+        (!('customerId' in existing()) || incoming().customerId == existing().customerId) &&
+        incoming().vehicleType == existing().vehicleType &&
+        (!('agreedFare' in existing()) || existing().agreedFare <= 0 || (('agreedFare' in incoming()) && incoming().agreedFare == existing().agreedFare));
+    }
+
+    function canCustomerUpdateRideDispatch() {
+      return ('customerId' in existing()) &&
+        existing().customerId == request.auth.uid &&
+        !(existing().status in ['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'completed', 'cancelled']) &&
+        (
+          (
+            incoming().status in ['CANCELLED', 'cancelled'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          ) ||
+          (
+            !('confirmedDriverId' in existing()) &&
+            (
+              (
+                incoming().status == 'EXPIRED' &&
+                ('expiresAtMs' in existing()) &&
+                request.time.toMillis() > existing().expiresAtMs &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              ) ||
+              (
+                existing().status in ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CUSTOMER_ACCEPTED', 'RIDER_ACCEPTED', 'requested', 'searching'] &&
+                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+                (
+                  (
+                    incoming().status == 'COUNTER_OFFERED' &&
+                    !('confirmedDriverId' in incoming()) &&
+                    !('assignedDriverId' in incoming()) &&
+                    !('agreedFare' in incoming()) &&
+                    incoming().diff(existing()).affectedKeys().hasOnly([
+                      'status', 'customerProposedFare', 'activeDriverOffers',
+                      'negotiationHistory', 'currentRound', 'expiresAt', 'expiresAtMs', 'updatedAt'
+                    ])
+                  ) ||
+                  (
+                    incoming().status == 'CONFIRMED' &&
+                    ('confirmedDriverId' in incoming()) &&
+                    incoming().confirmedDriverId is string && incoming().confirmedDriverId.size() > 0 &&
+                    ('agreedFare' in incoming()) &&
+                    incoming().agreedFare is number &&
+                    incoming().agreedFare >= 10 &&
+                    incoming().diff(existing()).affectedKeys().hasOnly([
+                      'status', 'routingStatus', 'assignedDriverId', 'confirmedDriverId',
+                      'driverName', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt',
+                      'confirmedAt', 'activeDriverOffers', 'negotiationHistory', 'updatedAt'
+                    ])
+                  )
+                )
+              )
+            )
+          )
+        );
+    }
+
+    function canDriverUpdateRideDispatchBody(drvId) {
+      return (
+        !('confirmedDriverId' in existing()) &&
+        ('eligibleDriverIds' in existing()) &&
+        drvId in existing().eligibleDriverIds &&
+        (
+          (
+            incoming().status == 'EXPIRED' &&
+            ('expiresAtMs' in existing()) &&
+            request.time.toMillis() > existing().expiresAtMs &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          ) ||
+          (
+            !('agreedFare' in incoming()) &&
+            !('confirmedDriverId' in incoming()) &&
+            incoming().status in [existing().status, 'REJECTED'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'rejectedDriverIds', 'activeDriverOffers', 'negotiationHistory', 'status', 'updatedAt'
+            ])
+          ) ||
+          (
+            existing().status in ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CUSTOMER_ACCEPTED', 'RIDER_ACCEPTED', 'requested', 'searching'] &&
+            (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+            (
+              (
+                incoming().status == 'COUNTER_OFFERED' &&
+                !('confirmedDriverId' in incoming()) &&
+                !('agreedFare' in incoming()) &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'currentRound', 'activeDriverOffers', 'negotiationHistory',
+                  'expiresAt', 'expiresAtMs', 'updatedAt'
+                ])
+              ) ||
+              (
+                incoming().status == 'CONFIRMED' &&
+                !('assignedDriverId' in existing()) &&
+                ('agreedFare' in incoming()) &&
+                incoming().agreedFare is number &&
+                incoming().agreedFare >= 10 &&
+                incoming().confirmedDriverId == drvId &&
+                incoming().assignedDriverId == drvId &&
+                (
+                  incoming().agreedFare == existing().customerProposedFare ||
+                  incoming().agreedFare == existing().estimatedFare
+                ) &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'routingStatus', 'assignedDriverId', 'confirmedDriverId',
+                  'driverName', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt',
+                  'confirmedAt', 'activeDriverOffers', 'negotiationHistory', 'updatedAt'
+                ])
+              )
+            )
+          )
+        )
+      ) ||
+      (
+        incoming().status in ['PICKUP', 'driver_arriving', 'IN_PROGRESS', 'ride_started', 'COMPLETED', 'completed'] &&
+        ('confirmedDriverId' in existing()) &&
+        existing().confirmedDriverId == drvId &&
+        incoming().confirmedDriverId == existing().confirmedDriverId &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+        (
+          (existing().status in ['CONFIRMED', 'accepted'] && incoming().status in ['PICKUP', 'driver_arriving']) ||
+          (existing().status in ['PICKUP', 'driver_arriving'] && incoming().status in ['IN_PROGRESS', 'ride_started']) ||
+          (existing().status in ['IN_PROGRESS', 'ride_started'] && incoming().status in ['COMPLETED', 'completed'])
+        )
+      );
+    }
+
+    // =========================================================================
     // DEFAULT DENY CATCH-ALL (GLOBAL SAFETY NET)
     // =========================================================================
     match /{document=**} {
@@ -851,7 +1099,6 @@ service cloud.firestore {
           )
         );
       allow update: if isValidId(customerId) &&
-        isValidCustomerData(incoming()) &&
         (
           isAdmin() ||
           (
@@ -861,7 +1108,8 @@ service cloud.firestore {
             (!('id' in existing()) || incoming().id == existing().id) &&
             (!('userId' in existing()) || incoming().userId == existing().userId)
           )
-        );
+        ) &&
+        isValidCustomerData(incoming());
       allow delete: if isAdmin();
     }
 
@@ -964,7 +1212,6 @@ service cloud.firestore {
         );
       allow update: if isValidId(productId) &&
         isSignedIn() &&
-        isValidProductData(incoming()) &&
         (
           isAdmin() ||
           (
@@ -975,7 +1222,8 @@ service cloud.firestore {
             !incoming().diff(existing()).affectedKeys().hasAny(['shopStatus', 'ownerId', 'shopId', 'id']) &&
             isApprovedShopOwner(existing().shopId)
           )
-        );
+        ) &&
+        isValidProductData(incoming());
       allow delete: if isValidId(productId) &&
         isSignedIn() &&
         (isAdmin() || (existing().ownerId == request.auth.uid && isApprovedShopOwner(existing().shopId)));
@@ -1074,18 +1322,10 @@ service cloud.firestore {
         (!('shopOwnerId' in incoming()) || incoming().shopOwnerId == '' || incoming().shopOwnerId == get(/databases/$(database)/documents/shops/$(incoming().shopId)).data.ownerId);
       allow update: if isValidId(orderId) &&
         isSignedIn() &&
-        isValidOrderData(incoming()) &&
         (
-          isAdmin() ||
+          (isAdmin() && isValidOrderData(incoming())) ||
           (
-            incoming().customerId == existing().customerId &&
-            incoming().shopId == existing().shopId &&
-            (!('shopOwnerId' in existing()) || (('shopOwnerId' in incoming()) && incoming().shopOwnerId == existing().shopOwnerId)) &&
-            incoming().items == existing().items &&
-            incoming().subtotal == existing().subtotal &&
-            incoming().deliveryFee == existing().deliveryFee &&
-            incoming().discount == existing().discount &&
-            incoming().total == existing().total &&
+            isOrderImmutableFieldsMatch(incoming(), existing()) &&
             (
               (
                 existing().customerId == request.auth.uid &&
@@ -1098,9 +1338,14 @@ service cloud.firestore {
                 incoming().diff(existing()).affectedKeys().hasOnly([
                   'status', 'rejectionReason', 'riderId', 'riderName', 'confirmedByShopkeeper', 'updatedAt'
                 ]) &&
+                canShopkeeperProgressOrderStatus(existing().status, incoming().status) &&
                 (
-                  !incoming().diff(existing()).affectedKeys().hasAny(['riderId', 'riderName']) ||
                   (
+                    !incoming().diff(existing()).affectedKeys().hasAny(['riderId', 'riderName']) &&
+                    incoming().status != 'out_for_delivery'
+                  ) ||
+                  (
+                    ('riderId' in incoming()) &&
                     incoming().riderId is string &&
                     isEligibleOnlineDeliveryRiderForShop(
                       incoming().riderId,
@@ -1108,37 +1353,9 @@ service cloud.firestore {
                     ) &&
                     incoming().riderName == get(/databases/$(database)/documents/deliveryPersons/$(incoming().riderId)).data.name
                   )
-                ) &&
-                (
-                  (existing().status in ['pending', 'placed'] && incoming().status in ['confirmed', 'rejected']) ||
-                  (existing().status == 'confirmed' && incoming().status in ['confirmed', 'preparing', 'packed', 'ready_for_dispatch']) ||
-                  (existing().status == 'preparing' && incoming().status in ['preparing', 'packed', 'ready_for_dispatch']) ||
-                  (
-                    existing().status in ['packed', 'ready_for_dispatch'] &&
-                    incoming().status in ['packed', 'ready_for_dispatch', 'out_for_delivery'] &&
-                    (
-                      incoming().status != 'out_for_delivery' ||
-                      (
-                        ('riderId' in incoming()) &&
-                        isEligibleOnlineDeliveryRiderForShop(
-                          incoming().riderId,
-                          get(/databases/$(database)/documents/shops/$(existing().shopId)).data.locality
-                        ) &&
-                        incoming().riderName == get(/databases/$(database)/documents/deliveryPersons/$(incoming().riderId)).data.name
-                      )
-                    )
-                  )
                 )
               ) ||
-              (
-                ('riderId' in existing()) &&
-                isApprovedDeliveryOwner(existing().riderId) &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
-                (
-                  (existing().status in ['confirmed', 'packed', 'ready_for_dispatch'] && incoming().status == 'out_for_delivery') ||
-                  (existing().status == 'out_for_delivery' && incoming().status == 'delivered')
-                )
-              )
+              canRiderProgressOrder(incoming().diff(existing()).affectedKeys())
             )
           )
         );
@@ -1195,8 +1412,6 @@ service cloud.firestore {
         incoming().id == driverId &&
         isAfterDriverApprovedWithActiveOwner(driverId, incoming().status);
       allow update: if isValidId(driverId) &&
-        isValidPublicDriverCard(incoming()) &&
-        incoming().id == driverId &&
         (
           (
             isAdmin() &&
@@ -1211,7 +1426,9 @@ service cloud.firestore {
               'name', 'vehicleType', 'locality', 'currentLocation', 'servedLocalities', 'isOnline', 'updatedAt'
             ])
           )
-        );
+        ) &&
+        isValidPublicDriverCard(incoming()) &&
+        incoming().id == driverId;
       allow delete: if isAdmin();
     }
 
@@ -1259,7 +1476,6 @@ service cloud.firestore {
         !('assignmentHistory' in incoming());
       allow update: if isValidId(rideId) &&
         isSignedIn() &&
-        // IMMUTABLE AGREED FARE LOCK (applies even to Admin once agreedFare is set)
         (!('agreedFare' in existing()) || existing().agreedFare <= 0 || (('agreedFare' in incoming()) && incoming().agreedFare == existing().agreedFare)) &&
         (
           isAdmin() ||
@@ -1267,94 +1483,39 @@ service cloud.firestore {
             existing().customerId == request.auth.uid &&
             incoming().customerId == existing().customerId &&
             !(existing().status in ['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'completed', 'cancelled']) &&
-            (
-              (
-                incoming().status in ['CANCELLED', 'cancelled'] &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'cancelledAt', 'cancelledBy', 'updatedAt'])
-              ) ||
-              (
-                !('driverId' in existing()) &&
-                incoming().status == 'EXPIRED' &&
-                ('expiresAtMs' in existing()) &&
-                request.time.toMillis() > existing().expiresAtMs &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'expiredAt', 'updatedAt'])
-              ) ||
-              (
-                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
-                !('driverId' in existing()) &&
-                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
-                incoming().status in ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED'] &&
-                (!('customerProposedFare' in incoming()) || (incoming().customerProposedFare is number && incoming().customerProposedFare >= 10)) &&
-                !('driverId' in incoming()) &&
-                !('driverName' in incoming()) &&
-                !('driverPhone' in incoming()) &&
-                !('driverLocality' in incoming()) &&
-                !('vehicleNumber' in incoming()) &&
-                !('driverRating' in incoming()) &&
-                !('agreedFare' in incoming()) &&
-                incoming().diff(existing()).affectedKeys().hasOnly([
-                  'status', 'customerProposedFare', 'activeDriverOffers',
-                  'negotiationHistory', 'currentRound', 'expiresAt', 'expiresAtMs', 'updatedAt'
-                ])
-              ) ||
-              (
-                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
-                !('driverId' in existing()) &&
-                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
-                incoming().status == 'CONFIRMED' &&
-                ('driverId' in incoming()) &&
-                isValidId(incoming().driverId) &&
-                ('agreedFare' in incoming()) &&
-                incoming().agreedFare is number &&
-                incoming().agreedFare >= 10 &&
-                existsAfter(/databases/$(database)/documents/rideDispatch/$(rideId)) &&
-                getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.status == 'CONFIRMED' &&
-                getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.confirmedDriverId == incoming().driverId &&
-                getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.agreedFare == incoming().agreedFare &&
-                incoming().diff(existing()).affectedKeys().hasOnly([
-                  'status', 'routingStatus', 'driverId', 'driverName', 'driverPhone',
-                  'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt', 'confirmedAt',
-                  'activeDriverOffers', 'negotiationHistory', 'updatedAt'
-                ])
-              )
-            )
+            canCustomerUpdateRideBookingNonConfirm()
           ) ||
           (
-            // Winning Driver atomic confirmation synced in same runTransaction with /rideDispatch/{rideId}
-            !('driverId' in existing()) &&
-            isActiveApprovedDriver() &&
-            !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'accepted', 'driver_arriving', 'ride_started', 'completed', 'cancelled']) &&
-            incoming().customerId == existing().customerId &&
             incoming().status == 'CONFIRMED' &&
+            !('driverId' in existing()) &&
+            incoming().customerId == existing().customerId &&
+            existing().status in ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CUSTOMER_ACCEPTED', 'RIDER_ACCEPTED', 'requested', 'searching'] &&
             ('driverId' in incoming()) &&
-            incoming().driverId == callerDriverId() &&
+            incoming().driverId is string && incoming().driverId.size() > 0 &&
             ('agreedFare' in incoming()) &&
-            incoming().agreedFare is number &&
-            incoming().agreedFare >= 10 &&
+            incoming().agreedFare is number && incoming().agreedFare >= 10 &&
             existsAfter(/databases/$(database)/documents/rideDispatch/$(rideId)) &&
             getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.status == 'CONFIRMED' &&
-            getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.confirmedDriverId == callerDriverId() &&
             getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.agreedFare == incoming().agreedFare &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'status', 'routingStatus', 'driverId', 'driverName', 'driverPhone',
-              'driverLocality', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt', 'confirmedAt',
-              'activeDriverOffers', 'negotiationHistory', 'updatedAt'
-            ])
-          ) ||
-          (
-            // Confirmed Driver trip status progression
-            ('driverId' in existing()) &&
-            ('driverId' in incoming()) &&
-            isApprovedDriverOwner(existing().driverId) &&
-            incoming().customerId == existing().customerId &&
-            incoming().driverId == existing().driverId &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'completedAt', 'updatedAt']) &&
+              'driverLocality', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt',
+              'confirmedAt', 'activeDriverOffers', 'negotiationHistory', 'updatedAt'
+            ]) &&
             (
-              (existing().status in ['CONFIRMED', 'accepted'] && incoming().status in ['PICKUP', 'driver_arriving']) ||
-              (existing().status in ['PICKUP', 'driver_arriving'] && incoming().status in ['IN_PROGRESS', 'ride_started']) ||
-              (existing().status in ['IN_PROGRESS', 'ride_started'] && incoming().status in ['COMPLETED', 'completed'])
+              (
+                existing().customerId == request.auth.uid &&
+                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+                getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.confirmedDriverId == incoming().driverId
+              ) ||
+              (
+                isActiveApprovedDriver() &&
+                incoming().driverId == callerDriverId() &&
+                getAfter(/databases/$(database)/documents/rideDispatch/$(rideId)).data.confirmedDriverId == callerDriverId()
+              )
             )
-          )
+          ) ||
+          canDriverProgressRideBooking()
         );
       allow delete: if isAdmin();
     }
@@ -2000,137 +2161,26 @@ service cloud.firestore {
         );
       allow update: if isValidId(dispatchId) &&
         isSignedIn() &&
-        isValidRideDispatchData(incoming()) &&
-        incoming().id == existing().id &&
-        incoming().rideId == existing().rideId &&
-        (!('customerId' in existing()) || incoming().customerId == existing().customerId) &&
-        incoming().vehicleType == existing().vehicleType &&
-        // IMMUTABLE AGREED FARE LOCK (even Admin cannot overwrite locked agreedFare)
-        (!('agreedFare' in existing()) || existing().agreedFare <= 0 || (('agreedFare' in incoming()) && incoming().agreedFare == existing().agreedFare)) &&
+        isRideDispatchInvariantMatch() &&
         (
           isAdmin() ||
-          (
-            ('customerId' in existing()) &&
-            existing().customerId == request.auth.uid &&
-            !(existing().status in ['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'completed', 'cancelled']) &&
-            (
-              (
-                incoming().status in ['CANCELLED', 'cancelled'] &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
-              ) ||
-              (
-                !('confirmedDriverId' in existing()) &&
-                ('expiresAtMs' in existing()) &&
-                request.time.toMillis() > existing().expiresAtMs &&
-                incoming().status == 'EXPIRED' &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
-              ) ||
-              (
-                !('confirmedDriverId' in existing()) &&
-                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
-                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
-                incoming().status == 'COUNTER_OFFERED' &&
-                !('confirmedDriverId' in incoming()) &&
-                !('assignedDriverId' in incoming()) &&
-                !('agreedFare' in incoming()) &&
-                incoming().diff(existing()).affectedKeys().hasOnly([
-                  'status', 'customerProposedFare', 'activeDriverOffers',
-                  'negotiationHistory', 'currentRound', 'expiresAt', 'expiresAtMs', 'updatedAt'
-                ])
-              ) ||
-              (
-                !('confirmedDriverId' in existing()) &&
-                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
-                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
-                incoming().status == 'CONFIRMED' &&
-                ('confirmedDriverId' in incoming()) &&
-                isValidId(incoming().confirmedDriverId) &&
-                ('agreedFare' in incoming()) &&
-                incoming().agreedFare is number &&
-                incoming().agreedFare >= 10 &&
-                incoming().diff(existing()).affectedKeys().hasOnly([
-                  'status', 'routingStatus', 'assignedDriverId', 'confirmedDriverId',
-                  'driverName', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt',
-                  'confirmedAt', 'activeDriverOffers', 'negotiationHistory', 'updatedAt'
-                ])
-              )
-            )
-          ) ||
+          canCustomerUpdateRideDispatch() ||
           (
             isActiveApprovedDriver() &&
             existing().vehicleType == callerDriverVehicleType() &&
-            (
-              (('eligibleDriverIds' in existing()) && callerDriverId() in existing().eligibleDriverIds) ||
-              (('confirmedDriverId' in existing()) && existing().confirmedDriverId == callerDriverId())
-            ) &&
             !(existing().status in ['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'completed', 'cancelled']) &&
             (
+              ('confirmedDriverId' in existing()) ||
               (
-                // Driver marks an already timed-out offer as EXPIRED
                 !('confirmedDriverId' in existing()) &&
-                ('expiresAtMs' in existing()) &&
-                request.time.toMillis() > existing().expiresAtMs &&
-                incoming().status == 'EXPIRED' &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
-              ) ||
-              (
-                // Driver declines pending ride (recorded on rejectedDriverIds; status becomes REJECTED only when no other eligible driver remains)
-                !('confirmedDriverId' in existing()) &&
-                !('agreedFare' in incoming()) &&
-                !('confirmedDriverId' in incoming()) &&
-                incoming().status in [existing().status, 'REJECTED'] &&
-                incoming().diff(existing()).affectedKeys().hasOnly([
-                  'rejectedDriverIds', 'activeDriverOffers', 'negotiationHistory', 'status', 'updatedAt'
-                ])
-              ) ||
-              (
-                // Driver sends counter offer before expiry & lock
-                !('confirmedDriverId' in existing()) &&
-                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
-                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
-                incoming().status == 'COUNTER_OFFERED' &&
-                !('confirmedDriverId' in incoming()) &&
-                !('agreedFare' in incoming()) &&
-                incoming().diff(existing()).affectedKeys().hasOnly([
-                  'status', 'currentRound', 'activeDriverOffers', 'negotiationHistory',
-                  'expiresAt', 'expiresAtMs', 'updatedAt'
-                ])
-              ) ||
-              (
-                // ATOMIC SINGLE-WINNER LOCK ON DISPATCH
-                !('confirmedDriverId' in existing()) &&
-                !('assignedDriverId' in existing()) &&
-                !(existing().status in ['CONFIRMED', 'PICKUP', 'IN_PROGRESS', 'accepted', 'driver_arriving', 'ride_started']) &&
-                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
-                incoming().status == 'CONFIRMED' &&
-                incoming().confirmedDriverId == callerDriverId() &&
-                incoming().assignedDriverId == callerDriverId() &&
-                ('agreedFare' in incoming()) &&
-                incoming().agreedFare is number &&
-                incoming().agreedFare >= 10 &&
                 (
-                  incoming().agreedFare == existing().customerProposedFare ||
-                  incoming().agreedFare == existing().estimatedFare
+                  (('expiresAtMs' in existing()) && request.time.toMillis() > existing().expiresAtMs) ||
+                  (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs)
                 ) &&
-                incoming().diff(existing()).affectedKeys().hasOnly([
-                  'status', 'routingStatus', 'assignedDriverId', 'confirmedDriverId',
-                  'driverName', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt',
-                  'confirmedAt', 'activeDriverOffers', 'negotiationHistory', 'updatedAt'
-                ])
-              ) ||
-              (
-                // Confirmed driver advances ride stages on dispatch summary
-                ('confirmedDriverId' in existing()) &&
-                existing().confirmedDriverId == callerDriverId() &&
-                incoming().confirmedDriverId == existing().confirmedDriverId &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
-                (
-                  (existing().status in ['CONFIRMED', 'accepted'] && incoming().status in ['PICKUP', 'driver_arriving']) ||
-                  (existing().status in ['PICKUP', 'driver_arriving'] && incoming().status in ['IN_PROGRESS', 'ride_started']) ||
-                  (existing().status in ['IN_PROGRESS', 'ride_started'] && incoming().status in ['COMPLETED', 'completed'])
-                )
+                (!('assignedDriverId' in existing()) || incoming().status != 'CONFIRMED')
               )
-            )
+            ) &&
+            canDriverUpdateRideDispatchBody(callerDriverId())
           )
         );
       allow delete: if isAdmin();

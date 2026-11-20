@@ -1,0 +1,48 @@
+name: TORSHA BAZAAR — Firestore Emulator Security Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  firestore-emulator-security-tests:
+    name: Run Real Firestore Emulator Security & Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Java 21 (required by Firebase Firestore Emulator)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Verify Java runtime
+        run: java -version
+
+      - name: Install project dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Run unit & static security tests
+        run: npm run test:unit
+
+      - name: Run Firestore Security Rules tests against live Firebase Emulator
+        run: npm run test:emulator
+
+      - name: TypeScript & Production Build Verification
+        run: |
+          npm run lint
+          npm run build

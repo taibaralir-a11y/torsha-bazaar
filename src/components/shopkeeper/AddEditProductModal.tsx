@@ -25,6 +25,7 @@ export const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
   const [inStock, setInStock] = useState(true);
   const [description, setDescription] = useState('');
   const [imageUrl, setImageUrl] = useState('');
+  const [formError, setFormError] = useState<string | null>(null);
 
   const imagePresets = [
     { label: 'Tomatoes', url: 'https://images.unsplash.com/photo-1546094096-0df4bcaaa337?w=400&auto=format&fit=crop&q=80' },
@@ -63,6 +64,7 @@ export const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
       setDescription('');
       setImageUrl(imagePresets[0].url);
     }
+    setFormError(null);
   }, [productToEdit, isOpen]);
 
   if (!isOpen) return null;
@@ -70,9 +72,10 @@ export const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) {
-      alert('Please enter a product name');
+      setFormError('Please enter a product name.');
       return;
     }
+    setFormError(null);
 
     onSave({
       name: name.trim(),
@@ -108,6 +111,11 @@ export const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-3.5">
+          {formError && (
+            <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-semibold px-3 py-2 rounded-xl">
+              {formError}
+            </div>
+          )}
           {/* Product Name */}
           <div>
             <label className="text-[11px] font-bold text-gray-700 block mb-1">Product Title</label>

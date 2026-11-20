@@ -9,7 +9,9 @@
     "start": "node server.js",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:unit": "tsx --test --test-force-exit src/utils/partnerLifecycle.test.ts src/utils/routingScenarios.test.ts src/utils/securityRepairs.test.ts src/utils/rideSystem.test.ts",
+    "test:emulator": "firebase emulators:exec --only firestore --project demo-torsha-bazaar \"npx tsx --test src/security/firestore.emulator.test.ts\""
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -27,6 +29,7 @@
     "vite": "^8.3.0"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^6.0.0",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",

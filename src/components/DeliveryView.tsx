@@ -15,7 +15,7 @@ import {
 interface DeliveryViewProps {
   onBackToHome: () => void;
   currentLocation: string;
-  onRequestDelivery?: (req: any) => void;
+  onRequestDelivery?: (req: any) => Promise<{ ok: boolean; error?: string } | void> | void;
   deliveryPersons?: DeliveryPerson[];
   routingConfig?: UniversalRoutingConfig;
   partnerAccounts?: PartnerAccount[];
@@ -40,6 +40,8 @@ export const DeliveryView: React.FC<DeliveryViewProps> = ({
   const [packageType, setPackageType] = useState('Documents & Files');
   const [packageWeight, setPackageWeight] = useState('Under 1 kg');
   const [isBooked, setIsBooked] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
 
   const packageOptions = ['Documents & Files', 'Food / Home Tiffin', 'Medicines', 'Electronics / Spare Parts', 'Clothes / Gifts'];
   const weightOptions = ['Under 1 kg (₹35)', '1 - 3 kg (₹55)', '3 - 5 kg (₹85)', '5 - 10 kg (₹130)'];
@@ -68,34 +70,45 @@ export const DeliveryView: React.FC<DeliveryViewProps> = ({
     );
   }, [deliveryPersons, routingConfig, partnerAccounts, localities, pickupArea]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!receiverName || !receiverPhone) {
-      alert('Please enter receiver name and phone number');
+    if (isSubmitting) return;
+    setSubmitError('');
+    if (!receiverName.trim() || !receiverPhone.trim()) {
+      setSubmitError('Please enter receiver name and phone number.');
       return;
     }
-    setIsBooked(true);
 
     if (onRequestDelivery) {
       const price = packageWeight.includes('130') ? 130 : packageWeight.includes('85') ? 85 : packageWeight.includes('55') ? 55 : 35;
-      onRequestDelivery({
-        id: `TB-DEL-${Math.floor(100 + Math.random() * 900)}`,
-        senderName,
-        senderPhone,
-        senderAddress: pickupAddress,
-        pickupLocality: pickupArea,
-        receiverName,
-        receiverPhone,
-        receiverAddress: dropAddress,
-        dropLocality: dropArea,
-        parcelDescription: packageType,
-        weightCategory: packageWeight,
-        estimatedPrice: price,
-        status: 'pending_assignment',
-        routingStatus: eligibleLocalRiders.length > 0 ? 'pending_admin_routing' : 'unavailable_in_locality',
-        createdAt: new Date().toISOString()
-      });
+      setIsSubmitting(true);
+      try {
+        const res = await onRequestDelivery({
+          id: `TB-DEL-${Math.floor(100 + Math.random() * 900)}`,
+          senderName,
+          senderPhone,
+          senderAddress: pickupAddress,
+          pickupLocality: pickupArea,
+          receiverName,
+          receiverPhone,
+          receiverAddress: dropAddress,
+          dropLocality: dropArea,
+          parcelDescription: packageType,
+          weightCategory: packageWeight,
+          estimatedPrice: price,
+          status: 'pending_assignment',
+          routingStatus: eligibleLocalRiders.length > 0 ? 'pending_admin_routing' : 'unavailable_in_locality',
+          createdAt: new Date().toISOString()
+        });
+        if (res && res.ok === false) {
+          setSubmitError(res.error || 'Could not submit delivery request.');
+          return;
+        }
+      } finally {
+        setIsSubmitting(false);
+      }
     }
+    setIsBooked(true);
   };
 
   return (
@@ -307,11 +320,19 @@ export const DeliveryView: React.FC<DeliveryViewProps> = ({
               </div>
             </div>
 
+            {submitError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+                <span>{submitError}</span>
+              </div>
+            )}
+
             <button
               type="submit"
-              className="w-full bg-[#0E7438] hover:bg-emerald-800 text-white font-bold py-3 rounded-2xl shadow-md text-sm active:scale-95 transition-all"
+              disabled={isSubmitting}
+              className="w-full bg-[#0E7438] hover:bg-emerald-800 disabled:opacity-60 text-white font-bold py-3 rounded-2xl shadow-md text-sm active:scale-95 transition-all"
             >
-              Request Doorstep Pickup
+              {isSubmitting ? 'Submitting Request...' : 'Request Doorstep Pickup'}
             </button>
           </form>
         )}

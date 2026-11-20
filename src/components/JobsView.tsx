@@ -5,7 +5,7 @@ import { JobListing } from '../types';
 interface JobsViewProps {
   onBackToHome: () => void;
   jobs?: JobListing[];
-  onApplyJob?: (app: any) => void;
+  onApplyJob?: (app: any) => Promise<{ ok: boolean; error?: string } | void> | void;
 }
 
 export const JobsView: React.FC<JobsViewProps> = ({ onBackToHome, jobs = [], onApplyJob }) => {
@@ -15,17 +15,20 @@ export const JobsView: React.FC<JobsViewProps> = ({ onBackToHome, jobs = [], onA
   const [applicantPhone, setApplicantPhone] = useState('');
   const [applicantNotes, setApplicantNotes] = useState('');
   const [showApplyModal, setShowApplyModal] = useState(false);
+  const [isApplying, setIsApplying] = useState(false);
+  const [jobNotice, setJobNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   const visibleJobs = jobs.filter((j) => j.status === 'approved');
 
-  const handleApply = (e: React.FormEvent) => {
+  const handleApply = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (selectedJob) {
-      setAppliedJobs([...appliedJobs, selectedJob.id]);
-      setShowApplyModal(false);
+    if (!selectedJob || isApplying) return;
+    setJobNotice(null);
 
-      if (onApplyJob) {
-        onApplyJob({
+    if (onApplyJob) {
+      setIsApplying(true);
+      try {
+        const res = await onApplyJob({
           id: `app-${Date.now()}`,
           jobId: selectedJob.id,
           ...(selectedJob.employerId ? { employerId: selectedJob.employerId } : {}),
@@ -37,10 +40,18 @@ export const JobsView: React.FC<JobsViewProps> = ({ onBackToHome, jobs = [], onA
           status: 'pending',
           appliedDate: 'Just Now'
         });
+        if (res && res.ok === false) {
+          setJobNotice({ type: 'err', text: res.error || 'Could not submit application.' });
+          return;
+        }
+      } finally {
+        setIsApplying(false);
       }
-
-      alert(`Application submitted successfully for "${selectedJob.title}".`);
     }
+
+    setAppliedJobs([...appliedJobs, selectedJob.id]);
+    setShowApplyModal(false);
+    setJobNotice({ type: 'ok', text: `Application submitted successfully for "${selectedJob.title}".` });
   };
 
   return (
@@ -65,6 +76,15 @@ export const JobsView: React.FC<JobsViewProps> = ({ onBackToHome, jobs = [], onA
       </div>
 
       <div className="p-4 space-y-3">
+        {jobNotice && !showApplyModal && (
+          <div className={`p-3 rounded-xl text-xs font-medium border ${
+            jobNotice.type === 'ok'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-rose-50 border-rose-200 text-rose-800'
+          }`}>
+            {jobNotice.text}
+          </div>
+        )}
         {visibleJobs.length === 0 ? (
           <div className="bg-white rounded-2xl border border-gray-100 p-6 text-center text-xs text-gray-500">
             No approved job listings available right now. Check back soon.
@@ -193,6 +213,12 @@ export const JobsView: React.FC<JobsViewProps> = ({ onBackToHome, jobs = [], onA
                 />
               </div>
 
+              {jobNotice?.type === 'err' && (
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium">
+                  {jobNotice.text}
+                </div>
+              )}
+
               <div className="flex gap-2 pt-1">
                 <button
                   type="button"
@@ -203,9 +229,10 @@ export const JobsView: React.FC<JobsViewProps> = ({ onBackToHome, jobs = [], onA
                 </button>
                 <button
                   type="submit"
-                  className="w-1/2 py-2.5 bg-[#0E7438] hover:bg-emerald-800 text-white text-xs font-bold rounded-xl shadow-xs"
+                  disabled={isApplying}
+                  className="w-1/2 py-2.5 bg-[#0E7438] hover:bg-emerald-800 disabled:opacity-60 text-white text-xs font-bold rounded-xl shadow-xs"
                 >
-                  Submit Application
+                  {isApplying ? 'Submitting...' : 'Submit Application'}
                 </button>
               </div>
             </form>

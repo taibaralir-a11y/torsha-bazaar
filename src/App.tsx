@@ -623,7 +623,7 @@ export default function App() {
 
   const resolveAuthUid = async (): Promise<string | null> => {
     if (auth.currentUser?.uid) return auth.currentUser.uid;
-    const fbUser = await ensureAuthSession(true);
+    const fbUser = await ensureAuthSession(false);
     return fbUser?.uid || null;
   };
 
@@ -1128,6 +1128,9 @@ export default function App() {
 
   const handlePartnerLogout = async () => {
     await deactivateNotificationTokensForUser(auth.currentUser?.uid);
+    rideBookingsRef.current.forEach((r) => {
+      closeRideSystemNotification(r.id).catch(() => {});
+    });
     rideAlertAudio.stopAllForPanel('driver');
     setActivePartnerAccount(null);
     setIsPartnerAccountResolved(true);
@@ -1147,6 +1150,9 @@ export default function App() {
 
   const handleAdminLogout = async () => {
     await deactivateNotificationTokensForUser(auth.currentUser?.uid);
+    rideBookingsRef.current.forEach((r) => {
+      closeRideSystemNotification(r.id).catch(() => {});
+    });
     rideAlertAudio.stopAllForPanel('admin');
     try {
       sessionStorage.removeItem('tb_admin_manual_switch');
@@ -2118,10 +2124,24 @@ export default function App() {
     setNotificationPermission(res.permission);
   };
 
-  // Keep notification token doc (including live FCM token when VAPID key is set) synced when permission is granted
+  // Keep notification token doc synced when permission is granted; deactivate immediately if partner suspended
   useEffect(() => {
     const uid = firebaseUser?.uid;
-    if (!uid || notificationPermission !== 'granted') return;
+    if (!uid) return;
+    if (portalMode === 'driver' && activePartnerAccount?.status === 'suspended') {
+      deactivateNotificationTokensForUser(uid).catch(() => {});
+      return;
+    }
+    if (notificationPermission !== 'granted') return;
+    if (
+      portalMode === 'driver' &&
+      !isAdminAuthenticated &&
+      (activePartnerAccount?.status !== 'active' ||
+        activePartnerAccount?.role !== 'driver' ||
+        currentDriver.status !== 'approved')
+    ) {
+      return;
+    }
     requestAndRegisterPushNotification({
       uid,
       role: portalMode,
@@ -2130,7 +2150,19 @@ export default function App() {
       locality: portalMode === 'driver' ? currentDriver.locality : currentLocation,
       requestPermissionIfDefault: false
     }).catch(() => {});
-  }, [firebaseUser?.uid, portalMode, notificationPermission, currentDriver.id, currentDriver.vehicleType, currentDriver.locality, currentLocation]);
+  }, [
+    firebaseUser?.uid,
+    portalMode,
+    notificationPermission,
+    isAdminAuthenticated,
+    activePartnerAccount?.status,
+    activePartnerAccount?.role,
+    currentDriver.id,
+    currentDriver.status,
+    currentDriver.vehicleType,
+    currentDriver.locality,
+    currentLocation
+  ]);
 
   // Persistent Sound Until Confirmation + OS Notifications + Confirmation Chime
   useEffect(() => {
@@ -2329,6 +2361,8 @@ export default function App() {
   const handleAddScrapRequest = async (req: ScrapRequest): Promise<{ ok: boolean; error?: string }> => {
     const authUid = await resolveAuthUid();
     if (!authUid) {
+      setCustomerAuthInitialStep('login');
+      setIsCustomerAuthModalOpen(true);
       return { ok: false, error: 'Please sign in to post a scrap pickup request.' };
     }
     const {
@@ -4179,6 +4213,8 @@ export default function App() {
   const handleCustomerBookRide = async (booking: RideBooking): Promise<{ ok: boolean; error?: string }> => {
     const authUid = await resolveAuthUid();
     if (!authUid) {
+      setCustomerAuthInitialStep('login');
+      setIsCustomerAuthModalOpen(true);
       return { ok: false, error: 'Please sign in to book a ride.' };
     }
     const pickupLoc = booking.pickupLocality || resolveAreaKey(booking.pickupLocation, localities);
@@ -4508,8 +4544,15 @@ export default function App() {
     logAdminAction('Manual Delivery Dispatch', `Assigned delivery ${deliveryId} to ${personName}`);
   };
 
-  const handleCustomerRequestDelivery = async (req: DeliveryRequest) => {
+  const handleCustomerRequestDelivery = async (
+    req: DeliveryRequest
+  ): Promise<{ ok: boolean; error?: string }> => {
     const authUid = await resolveAuthUid();
+    if (!authUid) {
+      setCustomerAuthInitialStep('login');
+      setIsCustomerAuthModalOpen(true);
+      return { ok: false, error: 'Please sign in to request parcel delivery.' };
+    }
     const pickupLoc = req.pickupLocality || resolveAreaKey(req.senderAddress, localities);
     const dropLoc = req.dropLocality || resolveAreaKey(req.receiverAddress, localities);
     const eligible =
@@ -4534,7 +4577,7 @@ export default function App() {
       pickupLocality: pickupLoc,
       dropLocality: dropLoc,
       routingStatus: eligible.length === 0 ? 'unavailable_in_locality' : 'pending_admin_routing',
-      customerId: authUid || req.customerId || ''
+      customerId: authUid
     };
     const alert = eligible.length === 0
       ? buildUnavailableLocalityAlert({
@@ -4544,18 +4587,22 @@ export default function App() {
         })
       : null;
 
-    if (authUid) {
+    try {
       const batch = writeBatch(db);
       batch.set(doc(db, 'deliveries', enriched.id), cleanForFirestore(enriched));
       if (alert) {
         batch.set(doc(db, 'routingAlerts', alert.id), cleanForFirestore(alert));
       }
-      await batch.commit().catch((err) => console.warn('Firestore delivery request error:', err));
+      await batch.commit();
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Unable to submit delivery request.' };
     }
+
     if (alert) {
       setRoutingAlerts((prev) => [alert, ...prev]);
     }
     setDeliveries((prev) => [enriched, ...prev]);
+    return { ok: true };
   };
 
   // --- SERVICE PROVIDERS HANDLERS ---
@@ -4736,8 +4783,15 @@ export default function App() {
     return { ok: true };
   };
 
-  const handleCustomerRequestService = async (req: ServiceRequest) => {
+  const handleCustomerRequestService = async (
+    req: ServiceRequest
+  ): Promise<{ ok: boolean; error?: string }> => {
     const authUid = await resolveAuthUid();
+    if (!authUid) {
+      setCustomerAuthInitialStep('login');
+      setIsCustomerAuthModalOpen(true);
+      return { ok: false, error: 'Please sign in to request a home service.' };
+    }
     const reqLoc = req.locality || resolveAreaKey(req.address, localities);
     const eligible = getEligiblePartnersForRequest({
       serviceCategory: 'service',
@@ -4752,7 +4806,7 @@ export default function App() {
       ...req,
       locality: reqLoc,
       routingStatus: eligible.length === 0 ? 'unavailable_in_locality' : 'pending_admin_routing',
-      customerId: authUid || req.customerId || ''
+      customerId: authUid
     };
     const alert = eligible.length === 0
       ? buildUnavailableLocalityAlert({
@@ -4763,18 +4817,22 @@ export default function App() {
         })
       : null;
 
-    if (authUid) {
+    try {
       const batch = writeBatch(db);
       batch.set(doc(db, 'serviceRequests', enrichedReq.id), cleanForFirestore(enrichedReq));
       if (alert) {
         batch.set(doc(db, 'routingAlerts', alert.id), cleanForFirestore(alert));
       }
-      await batch.commit().catch((err) => console.warn('Firestore serviceRequest error:', err));
+      await batch.commit();
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Unable to submit service request.' };
     }
+
     if (alert) {
       setRoutingAlerts((prev) => [alert, ...prev]);
     }
     setServiceRequests((prev) => [enrichedReq, ...prev]);
+    return { ok: true };
   };
 
   // --- EMPLOYER & JOBS HANDLERS ---
@@ -4834,14 +4892,26 @@ export default function App() {
     return { ok: true };
   };
 
-  const handleCustomerApplyJob = async (app: JobApplication) => {
+  const handleCustomerApplyJob = async (
+    app: JobApplication
+  ): Promise<{ ok: boolean; error?: string }> => {
     const authUid = await resolveAuthUid();
+    if (!authUid) {
+      setCustomerAuthInitialStep('login');
+      setIsCustomerAuthModalOpen(true);
+      return { ok: false, error: 'Please sign in to apply for jobs.' };
+    }
     const { employerId: _ignoredEmployerId, ...restApp } = app;
     const enrichedApp: JobApplication = {
       ...restApp,
       ...(app.employerId ? { employerId: app.employerId } : {}),
-      applicantId: authUid || app.applicantId
+      applicantId: authUid
     };
+    try {
+      await safeSetDoc(doc(db, 'jobApplications', enrichedApp.id), enrichedApp);
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Unable to submit job application.' };
+    }
     setJobApplications((prev) => [enrichedApp, ...prev]);
     setJobListings((prev) =>
       prev.map((j) =>
@@ -4850,9 +4920,7 @@ export default function App() {
           : j
       )
     );
-    if (authUid) {
-      safeSetDoc(doc(db, 'jobApplications', enrichedApp.id), enrichedApp).catch((err) => console.warn(err));
-    }
+    return { ok: true };
   };
 
   const handleUpdateJobApplicationStatus = (
@@ -4892,37 +4960,57 @@ export default function App() {
     logAdminAction('Grievance Resolved', `Resolved complaint ${complaintId}: ${notes}`);
   };
 
-  const handleCustomerFileComplaint = async (complaintData: Omit<Complaint, 'id' | 'createdAt' | 'status'>) => {
+  const handleCustomerFileComplaint = async (
+    complaintData: Omit<Complaint, 'id' | 'createdAt' | 'status'>
+  ): Promise<{ ok: boolean; error?: string }> => {
     const authUid = await resolveAuthUid();
+    if (!authUid) {
+      setCustomerAuthInitialStep('login');
+      setIsCustomerAuthModalOpen(true);
+      return { ok: false, error: 'Please sign in to file a grievance.' };
+    }
     const newComp: Complaint = {
       ...complaintData,
       id: `comp-${Date.now()}`,
-      userId: authUid || '',
+      userId: authUid,
       userName: user.name || 'Customer',
       userPhone: user.phone || '',
       status: 'open',
       createdAt: new Date().toISOString()
     };
-    setComplaints((prev) => [newComp, ...prev]);
-    if (authUid) {
-      safeSetDoc(doc(db, 'complaints', newComp.id), newComp).catch((err) => console.warn(err));
+    try {
+      await safeSetDoc(doc(db, 'complaints', newComp.id), newComp);
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Unable to submit complaint.' };
     }
+    setComplaints((prev) => [newComp, ...prev]);
+    return { ok: true };
   };
 
   // --- DOCTOR & EMERGENCY HEALTHCARE HANDLERS ---
-  const handleRequestDoctor = async (newReq: Omit<EmergencyDoctorRequest, 'id' | 'createdAt'>) => {
+  const handleRequestDoctor = async (
+    newReq: Omit<EmergencyDoctorRequest, 'id' | 'createdAt'>
+  ): Promise<{ ok: boolean; error?: string }> => {
     const authUid = await resolveAuthUid();
+    if (!authUid) {
+      setCustomerAuthInitialStep('login');
+      setIsCustomerAuthModalOpen(true);
+      return { ok: false, error: 'Please sign in to submit an urgent doctor request.' };
+    }
     const req: EmergencyDoctorRequest = {
       ...newReq,
       id: `emg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       createdAt: new Date().toISOString(),
-      patientUserId: authUid || '',
-      customerId: authUid || ''
+      patientUserId: authUid,
+      customerId: authUid
     };
-    setEmergencyDoctorRequests((prev) => [req, ...prev]);
-    if (authUid) {
-      safeSetDoc(doc(db, 'emergencyDoctorRequests', req.id), req).catch((err) => console.warn(err));
+    try {
+      await safeSetDoc(doc(db, 'emergencyDoctorRequests', req.id), req);
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Unable to submit emergency doctor request.' };
     }
+    setEmergencyDoctorRequests((prev) => [req, ...prev]);
+    return { ok: true };
   };
 
   const canActiveDoctorOperate = () =>

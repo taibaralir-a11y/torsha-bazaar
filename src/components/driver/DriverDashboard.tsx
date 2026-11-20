@@ -830,72 +830,82 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                 </div>
 
                 {/* Status Progress Stages */}
-                <div className="space-y-2 pt-2">
-                  <label className="text-xs font-bold text-gray-700 block">Trip Stage Progression:</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      disabled={isSubmittingAction}
-                      onClick={async () => {
-                        setActionNotice(null);
-                        setIsSubmittingAction(true);
-                        try {
-                          const res = await onUpdateRideStatus(currentAssignedRide.id, 'PICKUP');
-                          if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not update ride stage.' });
-                        } finally {
-                          setIsSubmittingAction(false);
-                        }
-                      }}
-                      className={`p-2.5 rounded-xl text-xs font-bold border transition-all disabled:opacity-50 ${
-                        currentAssignedRide.status === 'PICKUP' || currentAssignedRide.status === 'driver_arriving'
-                          ? 'bg-amber-500 text-white border-amber-600 shadow-sm'
-                          : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
-                      }`}
-                    >
-                      1. Arrived at Pickup
-                    </button>
+                {(() => {
+                  const activeStage = normalizeRideStatus(currentAssignedRide.status);
+                  const isAtConfirmed = activeStage === 'CONFIRMED';
+                  const isAtPickup = activeStage === 'PICKUP';
+                  const isInProgress = activeStage === 'IN_PROGRESS';
+                  return (
+                    <div className="space-y-2 pt-2">
+                      <label className="text-xs font-bold text-gray-700 block">
+                        Trip Stage Progression (Step 1 → Step 2 → Step 3):
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          disabled={isSubmittingAction || !isAtConfirmed}
+                          onClick={async () => {
+                            setActionNotice(null);
+                            setIsSubmittingAction(true);
+                            try {
+                              const res = await onUpdateRideStatus(currentAssignedRide.id, 'PICKUP');
+                              if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not update ride stage.' });
+                            } finally {
+                              setIsSubmittingAction(false);
+                            }
+                          }}
+                          className={`p-2.5 rounded-xl text-xs font-bold border transition-all disabled:opacity-60 ${
+                            isAtPickup || isInProgress
+                              ? 'bg-amber-500 text-white border-amber-600 shadow-sm'
+                              : 'bg-white text-gray-800 border-emerald-400 hover:bg-emerald-50'
+                          }`}
+                        >
+                          {isAtPickup || isInProgress ? '✓ 1. Arrived at Pickup' : '1. Arrived at Pickup'}
+                        </button>
 
-                    <button
-                      type="button"
-                      disabled={isSubmittingAction}
-                      onClick={async () => {
-                        setActionNotice(null);
-                        setIsSubmittingAction(true);
-                        try {
-                          const res = await onUpdateRideStatus(currentAssignedRide.id, 'IN_PROGRESS');
-                          if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not update ride stage.' });
-                        } finally {
-                          setIsSubmittingAction(false);
-                        }
-                      }}
-                      className={`p-2.5 rounded-xl text-xs font-bold border transition-all disabled:opacity-50 ${
-                        currentAssignedRide.status === 'IN_PROGRESS' || currentAssignedRide.status === 'ride_started'
-                          ? 'bg-blue-600 text-white border-blue-700 shadow-sm'
-                          : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
-                      }`}
-                    >
-                      2. Start Trip
-                    </button>
-                  </div>
+                        <button
+                          type="button"
+                          disabled={isSubmittingAction || !isAtPickup}
+                          onClick={async () => {
+                            setActionNotice(null);
+                            setIsSubmittingAction(true);
+                            try {
+                              const res = await onUpdateRideStatus(currentAssignedRide.id, 'IN_PROGRESS');
+                              if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not update ride stage.' });
+                            } finally {
+                              setIsSubmittingAction(false);
+                            }
+                          }}
+                          className={`p-2.5 rounded-xl text-xs font-bold border transition-all disabled:opacity-50 ${
+                            isInProgress
+                              ? 'bg-blue-600 text-white border-blue-700 shadow-sm'
+                              : isAtPickup
+                              ? 'bg-white text-blue-700 border-blue-400 hover:bg-blue-50'
+                              : 'bg-gray-50 text-gray-400 border-gray-200'
+                          }`}
+                        >
+                          {isInProgress ? '✓ 2. Trip Started' : '2. Start Trip'}
+                        </button>
+                      </div>
 
-                  <button
-                    type="button"
-                    disabled={isSubmittingAction}
-                    onClick={async () => {
-                      setActionNotice(null);
-                      setIsSubmittingAction(true);
-                      try {
-                        const res = await onUpdateRideStatus(currentAssignedRide.id, 'COMPLETED');
-                        if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not complete ride.' });
-                      } finally {
-                        setIsSubmittingAction(false);
-                      }
-                    }}
-                    className="w-full py-3 bg-[#0E7438] hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-2 shadow-md mt-2"
-                  >
-                    <CheckCircle2 className="w-4 h-4" />
-                    Complete Trip & Collect Fare (₹{currentAssignedRide.agreedFare || currentAssignedRide.customerProposedFare || currentAssignedRide.estimatedFare})
-                  </button>
+                      <button
+                        type="button"
+                        disabled={isSubmittingAction || !isInProgress}
+                        onClick={async () => {
+                          setActionNotice(null);
+                          setIsSubmittingAction(true);
+                          try {
+                            const res = await onUpdateRideStatus(currentAssignedRide.id, 'COMPLETED');
+                            if (res && res.ok === false) setActionNotice({ type: 'err', text: res.error || 'Could not complete ride.' });
+                          } finally {
+                            setIsSubmittingAction(false);
+                          }
+                        }}
+                        className="w-full py-3 bg-[#0E7438] hover:bg-emerald-800 disabled:bg-gray-300 disabled:text-gray-500 text-white font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-2 shadow-md mt-2"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        3. Complete Trip & Collect Fare (₹{currentAssignedRide.agreedFare || currentAssignedRide.customerProposedFare || currentAssignedRide.estimatedFare})
+                      </button>
 
                   {confirmCancelRideId === currentAssignedRide.id ? (
                     <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs space-y-2">
@@ -943,6 +953,8 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                     </button>
                   )}
                 </div>
+                  );
+                })()}
               </div>
             ) : (
               <div className="bg-white rounded-2xl border border-gray-100 p-8 text-center space-y-3">

@@ -35,7 +35,7 @@ interface AccountViewProps {
   onSelectLanguage: (lang: string) => void;
   localities?: LocalityInfo[];
   onOpenAuthModal?: () => void;
-  onFileComplaint?: (complaint: Omit<Complaint, 'id' | 'createdAt' | 'status'>) => void;
+  onFileComplaint?: (complaint: Omit<Complaint, 'id' | 'createdAt' | 'status'>) => Promise<{ ok: boolean; error?: string } | void> | void;
   complaints?: Complaint[];
   products?: Product[];
   onAddToCart?: (product: Product) => void;
@@ -85,6 +85,7 @@ export const AccountView: React.FC<AccountViewProps> = ({
   const [emergencyContactPhone, setEmergencyContactPhone] = useState(emergencyPhoneInitial || '');
   const [gpsDetecting, setGpsDetecting] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [gpsError, setGpsError] = useState('');
 
   useEffect(() => {
     if (!isEditing) {
@@ -119,6 +120,8 @@ export const AccountView: React.FC<AccountViewProps> = ({
   const [complaintTargetName, setComplaintTargetName] = useState('');
   const [complaintDescription, setComplaintDescription] = useState('');
   const [complaintSuccess, setComplaintSuccess] = useState(false);
+  const [complaintError, setComplaintError] = useState('');
+  const [isSubmittingComplaint, setIsSubmittingComplaint] = useState(false);
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -146,8 +149,9 @@ export const AccountView: React.FC<AccountViewProps> = ({
   };
 
   const handleDetectGps = () => {
+    setGpsError('');
     if (!navigator.geolocation) {
-      alert('Geolocation not supported by this device.');
+      setGpsError('Geolocation is not supported by this device.');
       return;
     }
     setGpsDetecting(true);
@@ -167,32 +171,40 @@ export const AccountView: React.FC<AccountViewProps> = ({
       },
       () => {
         setGpsDetecting(false);
-        alert('Could not retrieve GPS coordinates. Location remains set to ' + selectedLocality);
+        setGpsError('Could not retrieve GPS coordinates. Location remains set to ' + selectedLocality);
       },
       { timeout: 8000 }
     );
   };
 
-  const handleSubmitComplaint = (e: React.FormEvent) => {
+  const handleSubmitComplaint = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!complaintDescription.trim() || !onFileComplaint) return;
-
-    onFileComplaint({
-      type: complaintType,
-      targetId: 'target_' + Date.now(),
-      targetName: complaintTargetName.trim() || 'General Local Issue',
-      customerName: user.name,
-      customerPhone: user.phone,
-      userName: user.name,
-      userPhone: user.phone,
-      subject: `${complaintType.toUpperCase()}: ${complaintTargetName.trim() || 'Issue'}`,
-      description: complaintDescription.trim()
-    });
-
-    setComplaintDescription('');
-    setComplaintTargetName('');
-    setComplaintSuccess(true);
-    setTimeout(() => setComplaintSuccess(false), 5000);
+    if (!complaintDescription.trim() || !onFileComplaint || isSubmittingComplaint) return;
+    setComplaintError('');
+    setIsSubmittingComplaint(true);
+    try {
+      const res = await onFileComplaint({
+        type: complaintType,
+        targetId: 'target_' + Date.now(),
+        targetName: complaintTargetName.trim() || 'General Local Issue',
+        customerName: user.name,
+        customerPhone: user.phone,
+        userName: user.name,
+        userPhone: user.phone,
+        subject: `${complaintType.toUpperCase()}: ${complaintTargetName.trim() || 'Issue'}`,
+        description: complaintDescription.trim()
+      });
+      if (res && res.ok === false) {
+        setComplaintError(res.error || 'Could not submit complaint.');
+        return;
+      }
+      setComplaintDescription('');
+      setComplaintTargetName('');
+      setComplaintSuccess(true);
+      setTimeout(() => setComplaintSuccess(false), 5000);
+    } finally {
+      setIsSubmittingComplaint(false);
+    }
   };
 
   const userComplaints = complaints.filter(
@@ -388,6 +400,12 @@ export const AccountView: React.FC<AccountViewProps> = ({
           <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs flex items-center gap-2 animate-in fade-in">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>Customer profile updated successfully!</span>
+          </div>
+        )}
+        {gpsError && (
+          <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>{gpsError}</span>
           </div>
         )}
 
@@ -769,6 +787,13 @@ export const AccountView: React.FC<AccountViewProps> = ({
                 </div>
               )}
 
+              {complaintError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+                  <span>{complaintError}</span>
+                </div>
+              )}
+
               <form onSubmit={handleSubmitComplaint} className="space-y-3">
                 <div className="grid grid-cols-2 gap-2">
                   <div>
@@ -810,10 +835,11 @@ export const AccountView: React.FC<AccountViewProps> = ({
 
                 <button
                   type="submit"
-                  className="w-full py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center justify-center gap-1.5 transition-colors"
+                  disabled={isSubmittingComplaint}
+                  className="w-full py-2.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white font-bold text-xs rounded-xl shadow-xs flex items-center justify-center gap-1.5 transition-colors"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>Submit Complaint to Admin</span>
+                  <span>{isSubmittingComplaint ? 'Submitting...' : 'Submit Complaint to Admin'}</span>
                 </button>
               </form>
             </div>

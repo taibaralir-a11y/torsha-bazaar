@@ -43,6 +43,7 @@ export const MedicalShopView: React.FC<MedicalShopViewProps> = ({
   const [prescriptionImage, setPrescriptionImage] = useState<string | null>(null);
   const [doctorName, setDoctorName] = useState('');
   const [patientName, setPatientName] = useState('');
+  const [prescriptionError, setPrescriptionError] = useState<string | null>(null);
 
   const medicalProducts = products.filter(
     (p) => p.categoryType === 'medical' || p.category.includes('Medic') || p.category.includes('Health')
@@ -63,6 +64,7 @@ export const MedicalShopView: React.FC<MedicalShopViewProps> = ({
       const reader = new FileReader();
       reader.onloadend = () => {
         setPrescriptionImage(reader.result as string);
+        setPrescriptionError(null);
       };
       reader.readAsDataURL(file);
     }
@@ -71,9 +73,10 @@ export const MedicalShopView: React.FC<MedicalShopViewProps> = ({
   const handleConfirmPrescriptionAdd = () => {
     if (!prescriptionProduct) return;
     if (!prescriptionImage) {
-      alert('Please upload a clear photo of the doctor prescription.');
+      setPrescriptionError('Please upload a clear photo of the doctor prescription.');
       return;
     }
+    setPrescriptionError(null);
     onAddToCart(prescriptionProduct, prescriptionImage);
     setPrescriptionProduct(null);
     setPrescriptionImage(null);
@@ -340,13 +343,21 @@ export const MedicalShopView: React.FC<MedicalShopViewProps> = ({
                     <span className="truncate">Prescription photo attached successfully!</span>
                   </div>
                 )}
+                {prescriptionError && (
+                  <div className="mt-2 p-2 bg-red-50 rounded-xl border border-red-200 text-red-700 text-xs font-bold">
+                    {prescriptionError}
+                  </div>
+                )}
               </div>
             </div>
 
             <div className="pt-2 flex gap-2">
               <button
                 type="button"
-                onClick={() => setPrescriptionProduct(null)}
+                onClick={() => {
+                  setPrescriptionProduct(null);
+                  setPrescriptionError(null);
+                }}
                 className="flex-1 py-2.5 bg-gray-100 text-gray-700 font-bold rounded-xl text-xs"
               >
                 Cancel

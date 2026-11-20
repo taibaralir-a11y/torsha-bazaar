@@ -1,5 +1,5 @@
-import React from 'react';
-import { X, CheckCircle2, QrCode, Share2, Sparkles } from 'lucide-react';
+import React, { useState } from 'react';
+import { X, CheckCircle2, Share2, Sparkles } from 'lucide-react';
 
 interface PosterModalProps {
   isOpen: boolean;
@@ -7,6 +7,7 @@ interface PosterModalProps {
 }
 
 export const PosterModal: React.FC<PosterModalProps> = ({ isOpen, onClose }) => {
+  const [shareCopied, setShareCopied] = useState(false);
   if (!isOpen) return null;
 
   const features = [
@@ -84,15 +85,17 @@ export const PosterModal: React.FC<PosterModalProps> = ({ isOpen, onClose }) => 
                     text: 'Download Torsa Bazaar for online shopping, Toto & Taxi booking, parcel delivery and services in Kalchini!',
                     url: window.location.href
                   }).catch(() => {});
-                } else {
-                  navigator.clipboard.writeText(window.location.href);
-                  alert('Torsa Bazaar app link copied to clipboard!');
+                } else if (navigator.clipboard) {
+                  navigator.clipboard.writeText(window.location.href).then(() => {
+                    setShareCopied(true);
+                    window.setTimeout(() => setShareCopied(false), 2500);
+                  }).catch(() => {});
                 }
               }}
               className="bg-[#0E7438] hover:bg-emerald-800 text-white font-bold text-xs py-2 px-4 rounded-xl flex items-center gap-1.5 shadow-xs active:scale-95 transition-all"
             >
-              <Share2 className="w-3.5 h-3.5" />
-              <span>Share App Link</span>
+              {shareCopied ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Share2 className="w-3.5 h-3.5" />}
+              <span>{shareCopied ? 'Link Copied!' : 'Share App Link'}</span>
             </button>
           </div>
         </div>
