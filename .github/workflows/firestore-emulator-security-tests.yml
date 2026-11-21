@@ -37,12 +37,29 @@ jobs:
         run: npm install -g firebase-tools
 
       - name: Run unit & static security tests
+        id: unit_tests
         run: npm run test:unit
 
       - name: Run Firestore Security Rules tests against live Firebase Emulator
+        id: emulator_tests
         run: npm run test:emulator
 
       - name: TypeScript & Production Build Verification
+        id: build_check
         run: |
           npm run lint
           npm run build
+
+      - name: Publish Security & Release Test Summary
+        if: always()
+        run: |
+          {
+            echo "## TORSHA BAZAAR Security & Release Summary"
+            echo ""
+            echo "| Suite / Check | Status | Notes |"
+            echo "| --- | --- | --- |"
+            echo "| Unit & Static Security Tests (\`npm run test:unit\`) | ${{ steps.unit_tests.outcome == 'success' && 'PASS' || 'FAIL' }} | 28 automated unit & rule-contract tests |"
+            echo "| Live Firestore Emulator Security Tests (\`npm run test:emulator\`) | ${{ steps.emulator_tests.outcome == 'success' && 'PASS' || 'FAIL' }} | 16 real Emulator security suites (isolation, RBAC, locality, races, agreedFare lock, PII) |"
+            echo "| TypeScript & Production Build (\`npm run lint && npm run build\`) | ${{ steps.build_check.outcome == 'success' && 'PASS' || 'FAIL' }} | \`tsc --noEmit\`, Vite PWA bundle & Node server build |"
+            echo "| Physical Android Device & Closed-App FCM Push | NOT TESTED | Requires physical Android hardware & server-side FCM push sender |"
+          } >> "$GITHUB_STEP_SUMMARY"

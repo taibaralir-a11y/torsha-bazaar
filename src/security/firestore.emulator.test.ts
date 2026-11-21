@@ -29,9 +29,9 @@ const RULES_CONTENT = fs.readFileSync(RULES_PATH, 'utf8');
 let testEnv: RulesTestEnvironment;
 
 function parseEmulatorHost(): { host: string; port: number } {
-  const raw = process.env.FIRESTORE_EMULATOR_HOST || '127.0.0.1:8080';
+  const raw = process.env.FIRESTORE_EMULATOR_HOST || '127.0.0.1:8088';
   const [host, portStr] = raw.split(':');
-  return { host: host || '127.0.0.1', port: Number(portStr || 8080) };
+  return { host: host || '127.0.0.1', port: Number(portStr || 8088) };
 }
 
 function adminDb() {
@@ -1289,4 +1289,795 @@ test('10. Live simultaneous dual-driver confirmation race against Firestore Emul
   assert.equal(fulfilled.length, 1, 'Exactly one competing driver must win the ride confirmation race');
   assert.equal(rejected.length, 1, 'The competing driver must be rejected by Firestore Security Rules');
 });
+
+test('11. Shopkeeper catalog atomicity, cross-shop denial, full order lifecycle & cross-locality rider override', async () => {
+  const custA = userDb('cust-a');
+  const shopSatali = userDb('uid-shop-satali');
+  const delSatali = userDb('uid-del-satali');
+  const delJaigaon = userDb('uid-del-jaigaon');
+  const admin = adminDb();
+  const nowIso = new Date().toISOString();
+
+  // Seed a second active shopkeeper in Jaigaon
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await setDoc(doc(db, 'partnerAccounts', 'uid-shop-jaigaon'), {
+      uid: 'uid-shop-jaigaon',
+      role: 'shopkeeper',
+      displayName: 'Jaigaon Mart',
+      loginEmail: 'shopj@torsha.test',
+      linkedEntityId: 'shop-jaigaon-1',
+      status: 'active',
+      assignedBy: ADMIN_EMAIL
+    });
+    await setDoc(doc(db, 'shops', 'shop-jaigaon-1'), {
+      id: 'shop-jaigaon-1',
+      ownerId: 'uid-shop-jaigaon',
+      name: 'Jaigaon Mart',
+      locality: 'Jaigaon',
+      contactNumber: '+919800099902',
+      status: 'approved',
+      isVerified: true
+    });
+  });
+
+  // 1. Approved shopkeeper CAN atomically create private /products + public /publicProducts (no ownerId)
+  const prodBatch = writeBatch(shopSatali);
+  prodBatch.set(doc(shopSatali, 'products', 'prod-new-1'), {
+    id: 'prod-new-1',
+    ownerId: 'uid-shop-satali',
+    shopId: 'shop-satali-1',
+    shopStatus: 'approved',
+    name: 'Local Mustard Oil',
+    category: 'Grocery',
+    price: 160,
+    unit: '1L',
+    inStock: true
+  });
+  prodBatch.set(doc(shopSatali, 'publicProducts', 'prod-new-1'), {
+    id: 'prod-new-1',
+    shopId: 'shop-satali-1',
+    shopStatus: 'approved',
+    name: 'Local Mustard Oil',
+    category: 'Grocery',
+    price: 160,
+    unit: '1L',
+    inStock: true
+  });
+  await assertSucceeds(prodBatch.commit());
+
+  // 2. Direct /publicProducts write WITHOUT private /products or WITH ownerId leaked MUST FAIL
+  await assertFails(
+    setDoc(doc(shopSatali, 'publicProducts', 'prod-solo-leak'), {
+      id: 'prod-solo-leak',
+      ownerId: 'uid-shop-satali',
+      shopId: 'shop-satali-1',
+      shopStatus: 'approved',
+      name: 'Leaked Oil',
+      category: 'Grocery',
+      price: 100,
+      unit: '1L',
+      inStock: true
+    })
+  );
+
+  // 3. Cross-shop isolation: Jaigaon shopkeeper CANNOT read/write Satali shop's products
+  const shopJaigaon = userDb('uid-shop-jaigaon');
+  await assertFails(getDoc(doc(shopJaigaon, 'products', 'prod-new-1')));
+  await assertFails(updateDoc(doc(shopJaigaon, 'products', 'prod-new-1'), { price: 1 }));
+
+  // 4. Customer price-tampering on /orders create MUST FAIL; valid order SUCCEEDS
+  await assertFails(
+    setDoc(doc(custA, 'orders', 'ord-bad-price'), {
+      id: 'ord-bad-price',
+      customerId: 'cust-a',
+      shopId: 'shop-satali-1',
+      shopOwnerId: 'uid-shop-satali',
+      customerName: 'Asha Roy',
+      customerPhone: '+919800011111',
+      deliveryAddress: 'Satali House 5',
+      pickupLocality: 'Satali',
+      locality: 'Satali',
+      subtotal: 160,
+      deliveryFee: 20,
+      discount: 0,
+      total: 1, // tampered total!
+      paymentMethod: 'COD',
+      status: 'pending',
+      items: [{ id: 'prod-new-1', name: 'Local Mustard Oil', qty: 1, price: 160 }]
+    })
+  );
+
+  await assertSucceeds(
+    setDoc(doc(custA, 'orders', 'ord-lifecycle-1'), {
+      id: 'ord-lifecycle-1',
+      customerId: 'cust-a',
+      shopId: 'shop-satali-1',
+      shopOwnerId: 'uid-shop-satali',
+      customerName: 'Asha Roy',
+      customerPhone: '+919800011111',
+      deliveryAddress: 'Satali House 5',
+      pickupLocality: 'Satali',
+      locality: 'Satali',
+      subtotal: 160,
+      deliveryFee: 20,
+      discount: 0,
+      total: 180,
+      paymentMethod: 'COD',
+      status: 'pending',
+      items: [{ id: 'prod-new-1', name: 'Local Mustard Oil', qty: 1, price: 160 }]
+    })
+  );
+
+  // 5. Full shopkeeper progression + customer cancel allowed up to packed, blocked once out_for_delivery
+  await assertSucceeds(updateDoc(doc(shopSatali, 'orders', 'ord-lifecycle-1'), { status: 'confirmed', confirmedByShopkeeper: true, updatedAt: nowIso }));
+  await assertSucceeds(updateDoc(doc(shopSatali, 'orders', 'ord-lifecycle-1'), { status: 'preparing', updatedAt: nowIso }));
+  await assertSucceeds(updateDoc(doc(shopSatali, 'orders', 'ord-lifecycle-1'), { status: 'packed', updatedAt: nowIso }));
+
+  // Dispatch same-locality approved online rider
+  await assertSucceeds(
+    updateDoc(doc(shopSatali, 'orders', 'ord-lifecycle-1'), {
+      riderId: 'del-satali-1',
+      riderName: 'Bikram Delivery',
+      status: 'out_for_delivery',
+      updatedAt: nowIso
+    })
+  );
+  // Customer CANNOT cancel after out_for_delivery; delivered works for assigned rider
+  await assertFails(updateDoc(doc(custA, 'orders', 'ord-lifecycle-1'), { status: 'cancelled', updatedAt: nowIso }));
+  await assertSucceeds(updateDoc(doc(delSatali, 'orders', 'ord-lifecycle-1'), { status: 'delivered', updatedAt: nowIso }));
+
+  // 6. Cross-locality override: enable BOTH globalCrossLocalityEnabled and Satali.crossLocalityEnabled -> Jaigaon rider dispatch SUCCEEDS
+  await assertSucceeds(
+    setDoc(doc(custA, 'orders', 'ord-crossloc-1'), {
+      id: 'ord-crossloc-1',
+      customerId: 'cust-a',
+      shopId: 'shop-satali-1',
+      shopOwnerId: 'uid-shop-satali',
+      customerName: 'Asha Roy',
+      customerPhone: '+919800011111',
+      deliveryAddress: 'Satali House 5',
+      pickupLocality: 'Satali',
+      locality: 'Satali',
+      subtotal: 160,
+      deliveryFee: 20,
+      discount: 0,
+      total: 180,
+      paymentMethod: 'COD',
+      status: 'pending',
+      items: [{ id: 'prod-new-1', name: 'Local Mustard Oil', qty: 1, price: 160 }]
+    })
+  );
+  await assertSucceeds(updateDoc(doc(shopSatali, 'orders', 'ord-crossloc-1'), { status: 'confirmed', updatedAt: nowIso }));
+  await assertSucceeds(updateDoc(doc(shopSatali, 'orders', 'ord-crossloc-1'), { status: 'packed', updatedAt: nowIso }));
+  await assertSucceeds(
+    updateDoc(doc(admin, 'routingConfig', 'universal'), {
+      globalCrossLocalityEnabled: true,
+      rulesByLocality: {
+        Satali: {
+          crossLocalityEnabled: true,
+          nearbyLocalities: ['Jaigaon'],
+          rideDriverIds: ['drv-satali-1', 'drv-satali-2'],
+          deliveryRiderIds: ['del-satali-1']
+        },
+        Jaigaon: {
+          crossLocalityEnabled: false,
+          nearbyLocalities: [],
+          rideDriverIds: ['drv-jaigaon-1'],
+          deliveryRiderIds: ['del-jaigaon-1']
+        }
+      },
+      updatedAt: nowIso
+    })
+  );
+  await assertSucceeds(
+    updateDoc(doc(shopSatali, 'orders', 'ord-crossloc-1'), {
+      riderId: 'del-jaigaon-1',
+      riderName: 'Jaigaon Delivery',
+      status: 'out_for_delivery',
+      updatedAt: nowIso
+    })
+  );
+  await assertSucceeds(updateDoc(doc(delJaigaon, 'orders', 'ord-crossloc-1'), { status: 'delivered', updatedAt: nowIso }));
+});
+
+test('12. Employer (business partner) jobs isolation, anti-self-approval & jobApplications protection', async () => {
+  const custA = userDb('cust-a');
+  const custB = userDb('cust-b');
+  const emp1 = userDb('uid-emp-1');
+  const emp2 = userDb('uid-emp-2');
+  const admin = adminDb();
+  const nowIso = new Date().toISOString();
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    for (const [uid, email, name] of [
+      ['uid-emp-1', 'emp1@torsha.test', 'Torsha Logistics'],
+      ['uid-emp-2', 'emp2@torsha.test', 'Kalchini Motors']
+    ]) {
+      await setDoc(doc(db, 'partnerAccounts', uid), {
+        uid,
+        role: 'employer',
+        displayName: name,
+        loginEmail: email,
+        status: 'active',
+        assignedBy: ADMIN_EMAIL
+      });
+    }
+  });
+
+  // Customer CANNOT create jobs; Employer CANNOT self-approve on create or write publicJobs directly
+  await assertFails(
+    setDoc(doc(custA, 'jobs', 'job-cust-fail'), {
+      id: 'job-cust-fail',
+      employerId: 'cust-a',
+      employerName: 'Asha',
+      employerPhone: '+919800011111',
+      title: 'Helper',
+      category: 'Retail',
+      location: 'Satali',
+      salary: '12000',
+      jobType: 'Full-time',
+      description: 'Helper needed',
+      status: 'pending'
+    })
+  );
+  await assertFails(
+    setDoc(doc(emp1, 'jobs', 'job-self-approve'), {
+      id: 'job-self-approve',
+      employerId: 'uid-emp-1',
+      employerName: 'Torsha Logistics',
+      employerPhone: '+919800077701',
+      title: 'Store Manager',
+      category: 'Retail',
+      location: 'Satali',
+      salary: '18000',
+      jobType: 'Full-time',
+      description: 'Store manager needed',
+      status: 'approved'
+    })
+  );
+  await assertFails(
+    setDoc(doc(emp1, 'publicJobs', 'job-1'), {
+      id: 'job-1',
+      title: 'Direct Public Job',
+      company: 'Torsha Logistics',
+      category: 'Retail',
+      location: 'Satali',
+      salary: '15000',
+      jobType: 'Full-time',
+      status: 'approved'
+    })
+  );
+
+  // Employer 1 creates pending job -> SUCCEEDS; Employer 2 CANNOT read/modify it
+  await assertSucceeds(
+    setDoc(doc(emp1, 'jobs', 'job-1'), {
+      id: 'job-1',
+      employerId: 'uid-emp-1',
+      employerName: 'Torsha Logistics',
+      employerPhone: '+919800077701',
+      title: 'Warehouse Assistant',
+      category: 'Logistics',
+      location: 'Satali',
+      salary: '14000',
+      jobType: 'Full-time',
+      description: 'Assist daily dispatch operations',
+      status: 'pending'
+    })
+  );
+  await assertFails(getDoc(doc(emp2, 'jobs', 'job-1')));
+  await assertFails(updateDoc(doc(emp2, 'jobs', 'job-1'), { salary: '100' }));
+
+  // Customer CANNOT apply while job is pending
+  await assertFails(
+    setDoc(doc(custA, 'jobApplications', 'app-early'), {
+      id: 'app-early',
+      jobId: 'job-1',
+      employerId: 'uid-emp-1',
+      applicantId: 'cust-a',
+      jobTitle: 'Warehouse Assistant',
+      applicantName: 'Asha Roy',
+      applicantPhone: '+919800011111',
+      status: 'pending'
+    })
+  );
+
+  // Super Admin atomically approves job + publishes PII-free publicJobs card
+  const approveJobBatch = writeBatch(admin);
+  approveJobBatch.update(doc(admin, 'jobs', 'job-1'), { status: 'approved', updatedAt: nowIso });
+  approveJobBatch.set(doc(admin, 'publicJobs', 'job-1'), {
+    id: 'job-1',
+    title: 'Warehouse Assistant',
+    company: 'Torsha Logistics',
+    category: 'Logistics',
+    location: 'Satali',
+    salary: '14000',
+    jobType: 'Full-time',
+    status: 'approved',
+    updatedAt: nowIso
+  });
+  await assertSucceeds(approveJobBatch.commit());
+
+  // Customer A CAN apply with status='pending'; CANNOT spoof status='hired'
+  await assertFails(
+    setDoc(doc(custA, 'jobApplications', 'app-spoof'), {
+      id: 'app-spoof',
+      jobId: 'job-1',
+      employerId: 'uid-emp-1',
+      applicantId: 'cust-a',
+      jobTitle: 'Warehouse Assistant',
+      applicantName: 'Asha Roy',
+      applicantPhone: '+919800011111',
+      status: 'hired'
+    })
+  );
+  await assertSucceeds(
+    setDoc(doc(custA, 'jobApplications', 'app-1'), {
+      id: 'app-1',
+      jobId: 'job-1',
+      employerId: 'uid-emp-1',
+      applicantId: 'cust-a',
+      jobTitle: 'Warehouse Assistant',
+      applicantName: 'Asha Roy',
+      applicantPhone: '+919800011111',
+      status: 'pending'
+    })
+  );
+
+  // Customer B CANNOT read Customer A's application; Employer 1 CAN shortlist; Employer 2 CANNOT
+  await assertFails(getDoc(doc(custB, 'jobApplications', 'app-1')));
+  await assertFails(updateDoc(doc(emp2, 'jobApplications', 'app-1'), { status: 'rejected' }));
+  await assertSucceeds(updateDoc(doc(emp1, 'jobApplications', 'app-1'), { status: 'shortlisted', updatedAt: nowIso }));
+});
+
+test('13. Kabari marketplace publicScrapListings PII ban, isolated subcollection offers & selected buyer lifecycle', async () => {
+  const custA = userDb('cust-a');
+  const custB = userDb('cust-b');
+  const kabari1 = userDb('uid-kabari-1');
+  const kabari2 = userDb('uid-kabari-2');
+  const admin = adminDb();
+  const nowIso = new Date().toISOString();
+
+  // Customer CANNOT leak PII inside publicScrapListings
+  const piiScrapBatch = writeBatch(custA);
+  piiScrapBatch.set(doc(custA, 'scrapRequests', 'scrap-bad-1'), {
+    id: 'scrap-bad-1',
+    customerId: 'cust-a',
+    customerName: 'Asha Roy',
+    customerPhone: '+919800011111',
+    category: 'paper',
+    categoryLabel: 'Old Newspapers',
+    estimatedWeight: '15 kg',
+    pickupAddress: 'Secret Lane 3',
+    locality: 'Satali',
+    pincode: '735214',
+    status: 'open'
+  });
+  piiScrapBatch.set(doc(custA, 'publicScrapListings', 'scrap-bad-1'), {
+    id: 'scrap-bad-1',
+    customerPhone: '+919800011111', // forbidden PII!
+    category: 'paper',
+    categoryLabel: 'Old Newspapers',
+    estimatedWeight: '15 kg',
+    locality: 'Satali',
+    pincode: '735214',
+    status: 'open'
+  });
+  await assertFails(piiScrapBatch.commit());
+
+  // Clean atomic creation of scrapRequests + publicScrapListings
+  const cleanScrapBatch = writeBatch(custA);
+  cleanScrapBatch.set(doc(custA, 'scrapRequests', 'scrap-flow-1'), {
+    id: 'scrap-flow-1',
+    customerId: 'cust-a',
+    customerName: 'Asha Roy',
+    customerPhone: '+919800011111',
+    category: 'paper',
+    categoryLabel: 'Old Newspapers',
+    estimatedWeight: '15 kg',
+    pickupAddress: 'Secret Lane 3',
+    locality: 'Satali',
+    pincode: '735214',
+    status: 'open'
+  });
+  cleanScrapBatch.set(doc(custA, 'publicScrapListings', 'scrap-flow-1'), {
+    id: 'scrap-flow-1',
+    category: 'paper',
+    categoryLabel: 'Old Newspapers',
+    estimatedWeight: '15 kg',
+    locality: 'Satali',
+    pincode: '735214',
+    status: 'open'
+  });
+  await assertSucceeds(cleanScrapBatch.commit());
+
+  // Both kabari buyers CAN read publicScrapListings, CANNOT read private scrapRequests before selection
+  await assertSucceeds(getDoc(doc(kabari1, 'publicScrapListings', 'scrap-flow-1')));
+  await assertSucceeds(getDoc(doc(kabari2, 'publicScrapListings', 'scrap-flow-1')));
+  await assertFails(getDoc(doc(kabari1, 'scrapRequests', 'scrap-flow-1')));
+  await assertFails(getDoc(doc(custB, 'scrapRequests', 'scrap-flow-1')));
+
+  // Kabari buyers submit isolated offers (${requestId}_${uid}); Kabari 2 CANNOT read Kabari 1's offer; Customer A CAN read both
+  await assertSucceeds(
+    setDoc(doc(kabari1, 'scrapRequests', 'scrap-flow-1', 'offers', 'scrap-flow-1_uid-kabari-1'), {
+      id: 'scrap-flow-1_uid-kabari-1',
+      requestId: 'scrap-flow-1',
+      buyerId: 'uid-kabari-1',
+      buyerName: 'Satali Kabari 1',
+      totalOfferAmount: 300,
+      pickupTimeEstimate: 'Today 4 PM',
+      status: 'pending'
+    })
+  );
+  await assertSucceeds(
+    setDoc(doc(kabari2, 'scrapRequests', 'scrap-flow-1', 'offers', 'scrap-flow-1_uid-kabari-2'), {
+      id: 'scrap-flow-1_uid-kabari-2',
+      requestId: 'scrap-flow-1',
+      buyerId: 'uid-kabari-2',
+      buyerName: 'Satali Kabari 2',
+      totalOfferAmount: 280,
+      pickupTimeEstimate: 'Tomorrow 10 AM',
+      status: 'pending'
+    })
+  );
+  await assertFails(getDoc(doc(kabari2, 'scrapRequests', 'scrap-flow-1', 'offers', 'scrap-flow-1_uid-kabari-1')));
+  await assertSucceeds(getDoc(doc(custA, 'scrapRequests', 'scrap-flow-1', 'offers', 'scrap-flow-1_uid-kabari-1')));
+
+  // Admin selects Kabari 1; ONLY Kabari 1 can progress pickup stages; Kabari 2 remains blocked
+  const selectBatch = writeBatch(admin);
+  selectBatch.update(doc(admin, 'scrapRequests', 'scrap-flow-1'), {
+    status: 'accepted',
+    selectedBuyerId: 'uid-kabari-1',
+    selectedOfferId: 'scrap-flow-1_uid-kabari-1',
+    updatedAt: nowIso
+  });
+  selectBatch.update(doc(admin, 'publicScrapListings', 'scrap-flow-1'), {
+    status: 'accepted',
+    updatedAt: nowIso
+  });
+  await assertSucceeds(selectBatch.commit());
+
+  await assertFails(updateDoc(doc(kabari2, 'scrapRequests', 'scrap-flow-1'), { status: 'pickup_scheduled', updatedAt: nowIso }));
+  const completeScrapBatch = writeBatch(kabari1);
+  completeScrapBatch.update(doc(kabari1, 'scrapRequests', 'scrap-flow-1'), { status: 'pickup_scheduled', updatedAt: nowIso });
+  completeScrapBatch.update(doc(kabari1, 'publicScrapListings', 'scrap-flow-1'), { status: 'pickup_scheduled', updatedAt: nowIso });
+  await assertSucceeds(completeScrapBatch.commit());
+});
+
+test('14. Delivery parcels, complaints isolation, unassigned medical/service claims & admin restrictions', async () => {
+  const custA = userDb('cust-a');
+  const custB = userDb('cust-b');
+  const delSatali = userDb('uid-del-satali');
+  const delJaigaon = userDb('uid-del-jaigaon');
+  const admin = adminDb();
+  const nowIso = new Date().toISOString();
+
+  // 1. Deliveries create + assigned rider lifecycle + unassigned denial
+  await assertSucceeds(
+    setDoc(doc(custA, 'deliveries', 'delv-1'), {
+      id: 'delv-1',
+      customerId: 'cust-a',
+      senderName: 'Asha Roy',
+      senderPhone: '+919800011111',
+      senderAddress: 'Satali Quarter 4',
+      receiverName: 'Rina Das',
+      receiverPhone: '+919800088800',
+      receiverAddress: 'Hasimara Bazar',
+      pickupLocality: 'Satali',
+      dropLocality: 'Hasimara',
+      estimatedPrice: 60,
+      status: 'pending_assignment'
+    })
+  );
+  await assertFails(getDoc(doc(custB, 'deliveries', 'delv-1')));
+  await assertSucceeds(
+    updateDoc(doc(admin, 'deliveries', 'delv-1'), {
+      status: 'assigned',
+      assignedDeliveryPersonId: 'del-satali-1',
+      assignedDeliveryPersonName: 'Bikram Delivery',
+      updatedAt: nowIso
+    })
+  );
+  await assertFails(updateDoc(doc(delJaigaon, 'deliveries', 'delv-1'), { status: 'accepted', updatedAt: nowIso }));
+  for (const nextStatus of ['accepted', 'picked_up', 'on_the_way', 'delivered'] as const) {
+    await assertSucceeds(updateDoc(doc(delSatali, 'deliveries', 'delv-1'), { status: nextStatus, updatedAt: nowIso }));
+  }
+
+  // 2. Complaints create (status='open' only) & privacy
+  await assertFails(
+    setDoc(doc(custA, 'complaints', 'comp-bad'), {
+      id: 'comp-bad',
+      userId: 'cust-a',
+      subject: 'Spoofed resolve',
+      description: 'Should not create resolved directly',
+      status: 'resolved'
+    })
+  );
+  await assertSucceeds(
+    setDoc(doc(custA, 'complaints', 'comp-1'), {
+      id: 'comp-1',
+      userId: 'cust-a',
+      subject: 'Late parcel',
+      description: 'Parcel arrived 20 mins late',
+      status: 'open'
+    })
+  );
+  await assertFails(getDoc(doc(custB, 'complaints', 'comp-1')));
+  await assertFails(updateDoc(doc(custA, 'complaints', 'comp-1'), { status: 'resolved' }));
+  await assertSucceeds(updateDoc(doc(admin, 'complaints', 'comp-1'), { status: 'resolved' }));
+
+  // 3. Unassigned medical & service request client-side claiming is BLOCKED (requires Admin/Backend); /admins write forbidden even to Admin
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await setDoc(doc(db, 'partnerAccounts', 'uid-doc-1'), {
+      uid: 'uid-doc-1',
+      role: 'doctor',
+      displayName: 'Dr. Sen',
+      loginEmail: 'doc1@torsha.test',
+      linkedEntityId: 'doc-satali-1',
+      status: 'active',
+      assignedBy: ADMIN_EMAIL
+    });
+    await setDoc(doc(db, 'doctors', 'doc-satali-1'), {
+      id: 'doc-satali-1',
+      ownerId: 'uid-doc-1',
+      name: 'Dr. Sen',
+      phone: '+919800055501',
+      status: 'approved'
+    });
+    await setDoc(doc(db, 'partnerAccounts', 'uid-srv-1'), {
+      uid: 'uid-srv-1',
+      role: 'service_provider',
+      displayName: 'Satali Electric',
+      loginEmail: 'srv1@torsha.test',
+      linkedEntityId: 'srv-satali-1',
+      status: 'active',
+      assignedBy: ADMIN_EMAIL
+    });
+    await setDoc(doc(db, 'serviceProviders', 'srv-satali-1'), {
+      id: 'srv-satali-1',
+      ownerId: 'uid-srv-1',
+      name: 'Satali Electric',
+      phone: '+919800066601',
+      status: 'approved'
+    });
+  });
+
+  await assertSucceeds(
+    setDoc(doc(custA, 'emergencyDoctorRequests', 'emerg-unassigned'), {
+      id: 'emerg-unassigned',
+      patientUserId: 'cust-a',
+      patientName: 'Asha Roy',
+      patientPhone: '+919800011111',
+      patientAge: 34,
+      symptoms: 'Chest tightness',
+      locality: 'Satali',
+      status: 'searching'
+    })
+  );
+  const doc1 = userDb('uid-doc-1');
+  await assertFails(getDoc(doc(doc1, 'emergencyDoctorRequests', 'emerg-unassigned')));
+  await assertFails(
+    updateDoc(doc(doc1, 'emergencyDoctorRequests', 'emerg-unassigned'), {
+      assignedDoctorId: 'doc-satali-1',
+      status: 'accepted'
+    })
+  );
+
+  await assertSucceeds(
+    setDoc(doc(custA, 'serviceRequests', 'sreq-unassigned'), {
+      id: 'sreq-unassigned',
+      customerId: 'cust-a',
+      customerName: 'Asha Roy',
+      customerPhone: '+919800011111',
+      category: 'Electrician',
+      address: 'Satali Quarter 4',
+      preferredDate: '2026-06-01',
+      preferredTime: '11:00 AM',
+      issueDescription: 'Fan regulator fault',
+      estimatedFee: 200,
+      locality: 'Satali',
+      status: 'requested'
+    })
+  );
+  const srv1 = userDb('uid-srv-1');
+  await assertFails(getDoc(doc(srv1, 'serviceRequests', 'sreq-unassigned')));
+  await assertFails(updateDoc(doc(srv1, 'serviceRequests', 'sreq-unassigned'), { providerId: 'srv-satali-1', status: 'accepted' }));
+
+  // Even Super Admin cannot mutate /admins registry (server-managed only)
+  await assertFails(setDoc(doc(admin, 'admins', 'admin-uid-1'), { email: ADMIN_EMAIL }));
+});
+
+test('15. Ride bidirectional counter-offer loop, rideNotificationLogs isolation & malformed write rejection', async () => {
+  const custA = userDb('cust-a');
+  const custB = userDb('cust-b');
+  const d1 = userDb('uid-drv-satali-1');
+  const dSusp = userDb('uid-drv-suspended');
+  const nowIso = new Date().toISOString();
+
+  await seedPendingRide({
+    rideId: 'ride-counter-loop',
+    eligibleDriverIds: ['drv-satali-1'],
+    customerProposedFare: 110
+  });
+
+  // Customer proposes new counter-offer ₹130 across /rideDispatch + /rideBookings
+  const counterBatch = writeBatch(custA);
+  counterBatch.update(doc(custA, 'rideDispatch', 'ride-counter-loop'), {
+    status: 'COUNTER_OFFERED',
+    customerProposedFare: 130,
+    currentRound: 2,
+    expiresAt: new Date(Date.now() + 180_000).toISOString(),
+    expiresAtMs: Date.now() + 180_000,
+    updatedAt: nowIso
+  });
+  counterBatch.update(doc(custA, 'rideBookings', 'ride-counter-loop'), {
+    status: 'COUNTER_OFFERED',
+    customerProposedFare: 130,
+    currentRound: 2,
+    expiresAt: new Date(Date.now() + 180_000).toISOString(),
+    expiresAtMs: Date.now() + 180_000,
+    updatedAt: nowIso
+  });
+  await assertSucceeds(counterBatch.commit());
+
+  // Driver accepts customer's updated ₹130 fare atomically
+  const drvAcceptBatch = writeBatch(d1);
+  drvAcceptBatch.update(doc(d1, 'rideDispatch', 'ride-counter-loop'), {
+    status: 'CONFIRMED',
+    routingStatus: 'assigned',
+    assignedDriverId: 'drv-satali-1',
+    confirmedDriverId: 'drv-satali-1',
+    driverName: 'Ramesh Toto',
+    vehicleNumber: 'WB-70-T-1001',
+    driverRating: 4.9,
+    agreedFare: 130,
+    agreedAt: nowIso,
+    confirmedAt: nowIso,
+    activeDriverOffers: [],
+    negotiationHistory: [],
+    updatedAt: nowIso
+  });
+  drvAcceptBatch.update(doc(d1, 'rideBookings', 'ride-counter-loop'), {
+    status: 'CONFIRMED',
+    routingStatus: 'assigned',
+    driverId: 'drv-satali-1',
+    driverName: 'Ramesh Toto',
+    driverPhone: '+919800044400',
+    driverLocality: 'Satali',
+    vehicleNumber: 'WB-70-T-1001',
+    driverRating: 4.9,
+    agreedFare: 130,
+    agreedAt: nowIso,
+    confirmedAt: nowIso,
+    activeDriverOffers: [],
+    negotiationHistory: [],
+    updatedAt: nowIso
+  });
+  await assertSucceeds(drvAcceptBatch.commit());
+
+  // rideNotificationLogs isolation: Customer A & active driver can write valid log; suspended driver & Customer B read DENIED
+  await assertSucceeds(
+    setDoc(doc(custA, 'rideNotificationLogs', 'rlog-1'), {
+      id: 'rlog-1',
+      rideId: 'ride-counter-loop',
+      recipientRole: 'driver',
+      recipientId: 'uid-drv-satali-1',
+      locality: 'Satali',
+      vehicleType: 'toto',
+      channel: 'in_app',
+      eventType: 'ride_confirmed',
+      deliveryStatus: 'dispatched',
+      dedupKey: 'ride-counter-loop-confirmed-uid-drv-satali-1',
+      timestamp: nowIso
+    })
+  );
+  await assertSucceeds(getDoc(doc(d1, 'rideNotificationLogs', 'rlog-1')));
+  await assertFails(getDoc(doc(custB, 'rideNotificationLogs', 'rlog-1')));
+  await assertFails(
+    setDoc(doc(dSusp, 'rideNotificationLogs', 'rlog-susp'), {
+      id: 'rlog-susp',
+      rideId: 'ride-counter-loop',
+      recipientRole: 'driver',
+      recipientId: 'uid-drv-suspended',
+      locality: 'Satali',
+      vehicleType: 'toto',
+      channel: 'in_app',
+      eventType: 'ride_confirmed',
+      deliveryStatus: 'dispatched',
+      dedupKey: 'susp-key',
+      timestamp: nowIso
+    })
+  );
+
+  // Malformed writes rejected (invalid platform enum, empty items array on order, vehicleNumber PII on publicDrivers)
+  await assertFails(
+    setDoc(doc(custA, 'notificationTokens', 'nt-bad'), {
+      id: 'nt-bad',
+      uid: 'cust-a',
+      role: 'customer',
+      token: 'tok-123',
+      fcmEnabled: true,
+      permissionStatus: 'granted',
+      platform: 'desktop_exe', // invalid!
+      channelId: 'torsha_rides_urgent_v1',
+      active: true
+    })
+  );
+  await assertFails(
+    updateDoc(doc(d1, 'publicDrivers', 'drv-satali-1'), {
+      vehicleNumber: 'WB-70-T-1001',
+      updatedAt: nowIso
+    })
+  );
+});
+
+test('16. Cross-customer privacy sweep: Customer B is denied read access across all Customer A private records', async () => {
+  const custB = userDb('cust-b');
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await setDoc(doc(db, 'orders', 'ord-cust-a-priv'), {
+      id: 'ord-cust-a-priv',
+      customerId: 'cust-a',
+      shopId: 'shop-satali-1',
+      shopOwnerId: 'uid-shop-satali',
+      customerName: 'Asha Roy',
+      customerPhone: '+919800011111',
+      deliveryAddress: 'Satali Private',
+      subtotal: 100,
+      deliveryFee: 20,
+      discount: 0,
+      total: 120,
+      paymentMethod: 'COD',
+      status: 'pending',
+      items: [{ id: 'prod-1', name: 'Tea', qty: 1, price: 100 }]
+    });
+    await setDoc(doc(db, 'deliveries', 'delv-cust-a-priv'), {
+      id: 'delv-cust-a-priv',
+      customerId: 'cust-a',
+      senderName: 'Asha Roy',
+      senderPhone: '+919800011111',
+      senderAddress: 'Satali Private',
+      receiverName: 'Rina',
+      receiverPhone: '+919800088800',
+      receiverAddress: 'Hasimara',
+      pickupLocality: 'Satali',
+      dropLocality: 'Hasimara',
+      estimatedPrice: 50,
+      status: 'pending_assignment'
+    });
+    await setDoc(doc(db, 'complaints', 'comp-cust-a-priv'), {
+      id: 'comp-cust-a-priv',
+      userId: 'cust-a',
+      description: 'Private issue',
+      status: 'open'
+    });
+    await setDoc(doc(db, 'jobApplications', 'app-cust-a-priv'), {
+      id: 'app-cust-a-priv',
+      jobId: 'job-1',
+      applicantId: 'cust-a',
+      jobTitle: 'Clerk',
+      applicantName: 'Asha Roy',
+      applicantPhone: '+919800011111',
+      status: 'pending'
+    });
+  });
+  await seedPendingRide({ rideId: 'ride-cust-a-priv', customerId: 'cust-a' });
+
+  for (const [colName, docId] of [
+    ['customers', 'cust-a'],
+    ['orders', 'ord-cust-a-priv'],
+    ['deliveries', 'delv-cust-a-priv'],
+    ['rideBookings', 'ride-cust-a-priv'],
+    ['rideDispatch', 'ride-cust-a-priv'],
+    ['scrapRequests', 'scrap-1'],
+    ['jobApplications', 'app-cust-a-priv'],
+    ['complaints', 'comp-cust-a-priv']
+  ] as const) {
+    await assertFails(getDoc(doc(custB, colName, docId)));
+  }
+});
+
 

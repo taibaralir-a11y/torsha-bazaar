@@ -949,125 +949,132 @@ service cloud.firestore {
         (!('agreedFare' in existing()) || existing().agreedFare <= 0 || (('agreedFare' in incoming()) && incoming().agreedFare == existing().agreedFare));
     }
 
-    function canCustomerUpdateRideDispatch() {
+    function isBiddableRideStatus(s) {
+      return s in ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CUSTOMER_ACCEPTED', 'RIDER_ACCEPTED', 'requested', 'searching'];
+    }
+
+    function isConfirmDispatchPayloadValid(diffKeys) {
+      return ('agreedFare' in incoming()) &&
+        incoming().agreedFare is number &&
+        incoming().agreedFare >= 10 &&
+        diffKeys.hasOnly([
+          'status', 'routingStatus', 'assignedDriverId', 'confirmedDriverId',
+          'driverName', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt',
+          'confirmedAt', 'activeDriverOffers', 'negotiationHistory', 'updatedAt'
+        ]);
+    }
+
+    function canCustomerUpdateRideDispatch(diffKeys) {
       return ('customerId' in existing()) &&
         existing().customerId == request.auth.uid &&
-        !(existing().status in ['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'completed', 'cancelled']) &&
         (
           (
-            incoming().status in ['CANCELLED', 'cancelled'] &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+            diffKeys.hasOnly(['status', 'updatedAt']) &&
+            incoming().status in ['CANCELLED', 'cancelled', 'EXPIRED']
           ) ||
           (
             !('confirmedDriverId' in existing()) &&
+            isBiddableRideStatus(existing().status) &&
             (
               (
-                incoming().status == 'EXPIRED' &&
-                ('expiresAtMs' in existing()) &&
-                request.time.toMillis() > existing().expiresAtMs &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+                incoming().status == 'COUNTER_OFFERED' &&
+                !('confirmedDriverId' in incoming()) &&
+                !('assignedDriverId' in incoming()) &&
+                !('agreedFare' in incoming()) &&
+                diffKeys.hasOnly([
+                  'status', 'customerProposedFare', 'activeDriverOffers',
+                  'negotiationHistory', 'currentRound', 'expiresAt', 'expiresAtMs', 'updatedAt'
+                ])
               ) ||
               (
-                existing().status in ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CUSTOMER_ACCEPTED', 'RIDER_ACCEPTED', 'requested', 'searching'] &&
-                (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
-                (
-                  (
-                    incoming().status == 'COUNTER_OFFERED' &&
-                    !('confirmedDriverId' in incoming()) &&
-                    !('assignedDriverId' in incoming()) &&
-                    !('agreedFare' in incoming()) &&
-                    incoming().diff(existing()).affectedKeys().hasOnly([
-                      'status', 'customerProposedFare', 'activeDriverOffers',
-                      'negotiationHistory', 'currentRound', 'expiresAt', 'expiresAtMs', 'updatedAt'
-                    ])
-                  ) ||
-                  (
-                    incoming().status == 'CONFIRMED' &&
-                    ('confirmedDriverId' in incoming()) &&
-                    incoming().confirmedDriverId is string && incoming().confirmedDriverId.size() > 0 &&
-                    ('agreedFare' in incoming()) &&
-                    incoming().agreedFare is number &&
-                    incoming().agreedFare >= 10 &&
-                    incoming().diff(existing()).affectedKeys().hasOnly([
-                      'status', 'routingStatus', 'assignedDriverId', 'confirmedDriverId',
-                      'driverName', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt',
-                      'confirmedAt', 'activeDriverOffers', 'negotiationHistory', 'updatedAt'
-                    ])
-                  )
-                )
+                incoming().status == 'CONFIRMED' &&
+                ('confirmedDriverId' in incoming()) &&
+                incoming().confirmedDriverId is string && incoming().confirmedDriverId.size() > 0 &&
+                isConfirmDispatchPayloadValid(diffKeys)
               )
             )
           )
         );
     }
 
-    function canDriverUpdateRideDispatchBody(drvId) {
+    function canDriverUpdateRideDispatch(drvId, diffKeys) {
       return (
+        ('confirmedDriverId' in existing()) &&
+        incoming().status in ['PICKUP', 'driver_arriving', 'IN_PROGRESS', 'ride_started', 'COMPLETED', 'completed'] &&
+        existing().confirmedDriverId == drvId &&
+        incoming().confirmedDriverId == existing().confirmedDriverId &&
+        diffKeys.hasOnly(['status', 'updatedAt']) &&
+        (
+          (existing().status in ['CONFIRMED', 'accepted'] && incoming().status in ['PICKUP', 'driver_arriving']) ||
+          (existing().status in ['PICKUP', 'driver_arriving'] && incoming().status in ['IN_PROGRESS', 'ride_started']) ||
+          (existing().status in ['IN_PROGRESS', 'ride_started'] && incoming().status in ['COMPLETED', 'completed'])
+        )
+      ) ||
+      (
         !('confirmedDriverId' in existing()) &&
         ('eligibleDriverIds' in existing()) &&
         drvId in existing().eligibleDriverIds &&
         (
           (
             incoming().status == 'EXPIRED' &&
-            ('expiresAtMs' in existing()) &&
-            request.time.toMillis() > existing().expiresAtMs &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+            diffKeys.hasOnly(['status', 'updatedAt'])
           ) ||
           (
             !('agreedFare' in incoming()) &&
             !('confirmedDriverId' in incoming()) &&
             incoming().status in [existing().status, 'REJECTED'] &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'rejectedDriverIds', 'activeDriverOffers', 'negotiationHistory', 'status', 'updatedAt'
-            ])
+            diffKeys.hasOnly(['rejectedDriverIds', 'activeDriverOffers', 'negotiationHistory', 'status', 'updatedAt'])
           ) ||
           (
-            existing().status in ['REQUESTED', 'OFFER_SENT', 'COUNTER_OFFERED', 'CUSTOMER_ACCEPTED', 'RIDER_ACCEPTED', 'requested', 'searching'] &&
-            (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs) &&
+            isBiddableRideStatus(existing().status) &&
             (
               (
                 incoming().status == 'COUNTER_OFFERED' &&
                 !('confirmedDriverId' in incoming()) &&
                 !('agreedFare' in incoming()) &&
-                incoming().diff(existing()).affectedKeys().hasOnly([
+                diffKeys.hasOnly([
                   'status', 'currentRound', 'activeDriverOffers', 'negotiationHistory',
                   'expiresAt', 'expiresAtMs', 'updatedAt'
                 ])
               ) ||
               (
                 incoming().status == 'CONFIRMED' &&
-                !('assignedDriverId' in existing()) &&
-                ('agreedFare' in incoming()) &&
-                incoming().agreedFare is number &&
-                incoming().agreedFare >= 10 &&
                 incoming().confirmedDriverId == drvId &&
                 incoming().assignedDriverId == drvId &&
                 (
                   incoming().agreedFare == existing().customerProposedFare ||
                   incoming().agreedFare == existing().estimatedFare
                 ) &&
-                incoming().diff(existing()).affectedKeys().hasOnly([
-                  'status', 'routingStatus', 'assignedDriverId', 'confirmedDriverId',
-                  'driverName', 'vehicleNumber', 'driverRating', 'agreedFare', 'agreedAt',
-                  'confirmedAt', 'activeDriverOffers', 'negotiationHistory', 'updatedAt'
-                ])
+                isConfirmDispatchPayloadValid(diffKeys)
               )
             )
           )
         )
-      ) ||
-      (
-        incoming().status in ['PICKUP', 'driver_arriving', 'IN_PROGRESS', 'ride_started', 'COMPLETED', 'completed'] &&
-        ('confirmedDriverId' in existing()) &&
-        existing().confirmedDriverId == drvId &&
-        incoming().confirmedDriverId == existing().confirmedDriverId &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
-        (
-          (existing().status in ['CONFIRMED', 'accepted'] && incoming().status in ['PICKUP', 'driver_arriving']) ||
-          (existing().status in ['PICKUP', 'driver_arriving'] && incoming().status in ['IN_PROGRESS', 'ride_started']) ||
-          (existing().status in ['IN_PROGRESS', 'ride_started'] && incoming().status in ['COMPLETED', 'completed'])
-        )
       );
+    }
+
+    function checkDispatchDriverDoc(drvData, drvId, diffKeys) {
+      return checkApprovedOwnedEntity(drvData) &&
+        existing().vehicleType == drvData.vehicleType &&
+        canDriverUpdateRideDispatch(drvId, diffKeys);
+    }
+
+    function checkDispatchDriverPartner(pa, diffKeys) {
+      return pa.status == 'active' &&
+        pa.role == 'driver' &&
+        ('linkedEntityId' in pa) &&
+        pa.linkedEntityId is string &&
+        pa.linkedEntityId.size() > 0 &&
+        exists(/databases/$(database)/documents/drivers/$(pa.linkedEntityId)) &&
+        checkDispatchDriverDoc(get(/databases/$(database)/documents/drivers/$(pa.linkedEntityId)).data, pa.linkedEntityId, diffKeys);
+    }
+
+    function canNonAdminUpdateRideDispatch(diffKeys) {
+      return canCustomerUpdateRideDispatch(diffKeys) ||
+        (
+          exists(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)) &&
+          checkDispatchDriverPartner(get(/databases/$(database)/documents/partnerAccounts/$(request.auth.uid)).data, diffKeys)
+        );
     }
 
     // =========================================================================
@@ -2164,23 +2171,24 @@ service cloud.firestore {
         isRideDispatchInvariantMatch() &&
         (
           isAdmin() ||
-          canCustomerUpdateRideDispatch() ||
           (
-            isActiveApprovedDriver() &&
-            existing().vehicleType == callerDriverVehicleType() &&
             !(existing().status in ['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'completed', 'cancelled']) &&
             (
-              ('confirmedDriverId' in existing()) ||
+              (
+                ('confirmedDriverId' in existing()) &&
+                !(incoming().status in ['EXPIRED', 'COUNTER_OFFERED', 'CONFIRMED', 'REJECTED'])
+              ) ||
               (
                 !('confirmedDriverId' in existing()) &&
+                (incoming().status != 'CONFIRMED' || !('assignedDriverId' in existing())) &&
                 (
-                  (('expiresAtMs' in existing()) && request.time.toMillis() > existing().expiresAtMs) ||
-                  (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs)
-                ) &&
-                (!('assignedDriverId' in existing()) || incoming().status != 'CONFIRMED')
+                  !(incoming().status in ['EXPIRED', 'COUNTER_OFFERED', 'CONFIRMED']) ||
+                  (incoming().status == 'EXPIRED' && ('expiresAtMs' in existing()) && request.time.toMillis() > existing().expiresAtMs) ||
+                  (incoming().status in ['COUNTER_OFFERED', 'CONFIRMED'] && (!('expiresAtMs' in existing()) || request.time.toMillis() <= existing().expiresAtMs))
+                )
               )
             ) &&
-            canDriverUpdateRideDispatchBody(callerDriverId())
+            canNonAdminUpdateRideDispatch(incoming().diff(existing()).affectedKeys())
           )
         );
       allow delete: if isAdmin();
