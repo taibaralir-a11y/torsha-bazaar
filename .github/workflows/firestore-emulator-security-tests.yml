@@ -21,6 +21,14 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+
+      - name: Verify Bun runtime
+        run: bun --version
+
       - name: Set up Java 21 (required by Firebase Firestore Emulator)
         uses: actions/setup-java@v4
         with:
@@ -31,24 +39,25 @@ jobs:
         run: java -version
 
       - name: Install project dependencies
-        run: npm install --no-audit --no-fund
+        id: install_deps
+        run: bun install --frozen-lockfile
 
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
 
       - name: Run unit & static security tests
         id: unit_tests
-        run: npm run test:unit
+        run: bun run test:unit
 
       - name: Run Firestore Security Rules tests against live Firebase Emulator
         id: emulator_tests
-        run: npm run test:emulator
+        run: bun run test:emulator
 
       - name: TypeScript & Production Build Verification
         id: build_check
         run: |
-          npm run lint
-          npm run build
+          bun run lint
+          bun run build
 
       - name: Publish Security & Release Test Summary
         if: always()
@@ -58,8 +67,9 @@ jobs:
             echo ""
             echo "| Suite / Check | Status | Notes |"
             echo "| --- | --- | --- |"
-            echo "| Unit & Static Security Tests (\`npm run test:unit\`) | ${{ steps.unit_tests.outcome == 'success' && 'PASS' || 'FAIL' }} | 28 automated unit & rule-contract tests |"
-            echo "| Live Firestore Emulator Security Tests (\`npm run test:emulator\`) | ${{ steps.emulator_tests.outcome == 'success' && 'PASS' || 'FAIL' }} | 16 real Emulator security suites (isolation, RBAC, locality, races, agreedFare lock, PII) |"
-            echo "| TypeScript & Production Build (\`npm run lint && npm run build\`) | ${{ steps.build_check.outcome == 'success' && 'PASS' || 'FAIL' }} | \`tsc --noEmit\`, Vite PWA bundle & Node server build |"
+            echo "| Dependencies (\`bun install --frozen-lockfile\`) | ${{ steps.install_deps.outcome == 'success' && 'PASS' || (steps.install_deps.outcome == 'skipped' && 'SKIPPED' || 'FAIL') }} | Deterministic install from \`bun.lock\` (Bun 1.4.4) |"
+            echo "| Unit & Static Security Tests (\`bun run test:unit\`) | ${{ steps.unit_tests.outcome == 'success' && 'PASS' || (steps.unit_tests.outcome == 'skipped' && 'SKIPPED' || 'FAIL') }} | 28 automated unit & rule-contract tests |"
+            echo "| Live Firestore Emulator Security Tests (\`bun run test:emulator\`) | ${{ steps.emulator_tests.outcome == 'success' && 'PASS' || (steps.emulator_tests.outcome == 'skipped' && 'SKIPPED' || 'FAIL') }} | 16 real Emulator security suites (isolation, RBAC, locality, races, agreedFare lock, PII) |"
+            echo "| TypeScript & Production Build (\`bun run lint && bun run build\`) | ${{ steps.build_check.outcome == 'success' && 'PASS' || (steps.build_check.outcome == 'skipped' && 'SKIPPED' || 'FAIL') }} | \`tsc --noEmit\`, Vite PWA bundle & Node server build |"
             echo "| Physical Android Device & Closed-App FCM Push | NOT TESTED | Requires physical Android hardware & server-side FCM push sender |"
           } >> "$GITHUB_STEP_SUMMARY"
